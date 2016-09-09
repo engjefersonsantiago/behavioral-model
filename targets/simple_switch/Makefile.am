@@ -46,6 +46,7 @@ AM_CPPFLAGS += \
 -I$(builddir)/gen-cpp
 
 libsimpleswitch_la_LIBADD = \
+$(top_builddir)/../ROHC/export/librohc_compressor_module.la \
 $(top_builddir)/src/bm_sim/libbmsim.la \
 $(top_builddir)/src/bf_lpm_trie/libbflpmtrie.la \
 $(top_builddir)/src/BMI/libbmi.la \
@@ -58,7 +59,7 @@ noinst_LTLIBRARIES = libsimpleswitch.la
 
 libsimpleswitch_la_SOURCES = \
 simple_switch.cpp simple_switch.h primitives.cpp \
-thrift/src/SimpleSwitch_server.cpp
+extern_rohc_comp.cpp extern_rohc_decomp.cpp thrift/src/SimpleSwitch_server.cpp
 
 bin_PROGRAMS = simple_switch
 
