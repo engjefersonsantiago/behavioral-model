@@ -105,6 +105,7 @@ SimpleSwitch::SimpleSwitch(int max_port, bool enable_swap)
   force_arith_field("intrinsic_metadata", "lf_field_list");
   force_arith_field("intrinsic_metadata", "mcast_grp");
   force_arith_field("intrinsic_metadata", "resubmit_flag");
+  force_arith_field("intrinsic_metadata", "modify_and_resubmit_flag");
   force_arith_field("intrinsic_metadata", "egress_rid");
   force_arith_field("intrinsic_metadata", "recirculate_flag");
 
@@ -283,6 +284,10 @@ SimpleSwitch::check_queueing_metadata() {
   }
 }
 
+// Timers
+std::chrono::high_resolution_clock::time_point
+    ti_ingress, tf_ingress, tf_egress;
+
 void
 SimpleSwitch::ingress_thread() {
   PHV *phv;
@@ -290,6 +295,9 @@ SimpleSwitch::ingress_thread() {
   while (1) {
     std::unique_ptr<Packet> packet;
     input_buffer.pop_back(&packet);
+
+    ti_ingress = std::chrono::high_resolution_clock::now();
+
 
     // TODO(antonin): only update these if swapping actually happened?
     Parser *parser = this->get_parser("parser");
@@ -384,6 +392,35 @@ SimpleSwitch::ingress_thread() {
       }
     }
 
+    // MODIFY AND RESUBMIT
+    if (phv->has_field("intrinsic_metadata.modify_and_resubmit_flag")) {
+
+      Field &modify_and_resubmit = phv->get_field("intrinsic_metadata.modify_and_resubmit_flag");
+      if (modify_and_resubmit.get_int()) {
+        Deparser *deparser = this->get_deparser("deparser");
+        deparser->deparse(packet.get());
+        BMLOG_DEBUG_PKT(*packet, "Modifying and resubmitting packet");
+        // get the packet ready for being parsed again at the beginning of
+        // ingress
+        p4object_id_t field_list_id = modify_and_resubmit.get_int();
+        modify_and_resubmit.set(0);
+        // TODO(antonin): a copy is not needed here, but I don't yet have an
+        // optimized way of doing this
+        auto packet_copy = copy_ingress_pkt(
+            packet, PKT_INSTANCE_TYPE_RESUBMIT, field_list_id);
+        PHV *phv_copy = packet_copy->get_phv();
+        size_t packet_size = packet_copy->get_data_size();
+        packet_copy->set_register(PACKET_LENGTH_REG_IDX, packet_size);
+        phv_copy->get_field("standard_metadata.packet_length").set(packet_size);
+        input_buffer.push_front(std::move(packet_copy));
+        tf_ingress = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>
+            (tf_ingress - ti_ingress).count();
+        std::cout << "Modify and Resubmit Latency: " << duration << " useconds\n";
+        continue;
+      }
+    }
+
     Field &f_instance_type = phv->get_field("standard_metadata.instance_type");
 
     // MULTICAST
@@ -418,6 +455,7 @@ SimpleSwitch::ingress_thread() {
     }
 
     enqueue(egress_port, std::move(packet));
+    //tf_ingress = std::chrono::high_resolution_clock::now();
   }
 }
 
@@ -510,10 +548,19 @@ SimpleSwitch::egress_thread(size_t worker_id) {
         packet_copy->set_register(PACKET_LENGTH_REG_IDX, packet_size);
         phv_copy->get_field("standard_metadata.packet_length").set(packet_size);
         input_buffer.push_front(std::move(packet_copy));
+        tf_egress = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>
+            (tf_egress - ti_ingress).count();
+        std::cout << "Recirculate Latency: " << duration << " useconds\n";
         continue;
       }
     }
 
     output_buffer.push_front(std::move(packet));
-  }
+    tf_egress = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>
+        (tf_egress - ti_ingress).count();
+    std::cout << "Packet Latency: " << duration << " useconds\n";
+
+ }
 }

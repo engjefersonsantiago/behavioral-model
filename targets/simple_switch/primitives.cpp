@@ -19,6 +19,8 @@
  */
 
 #include <bm/bm_sim/actions.h>
+#include <rohc/rohc_compressor_module.h>
+#include <rohc/rohc_decompressor_module.h>
 
 #include <random>
 
@@ -33,6 +35,13 @@ using bm::CounterArray;
 using bm::RegisterArray;
 using bm::NamedCalculation;
 using bm::HeaderStack;
+using bm::PHV;
+
+using ROHC::RohcCompressorEntity;
+using ROHC::RohcDecompressorEntity;
+
+RohcDecompressorEntity rohc_d_ent(true, false);
+RohcCompressorEntity rohc_c_ent(true, false);
 
 class modify_field : public ActionPrimitive<Data &, const Data &> {
   void operator ()(Data &dst, const Data &src) {
@@ -354,6 +363,161 @@ class truncate_ : public ActionPrimitive<const Data &> {
 };
 
 REGISTER_PRIMITIVE_W_NAME("truncate", truncate_);
+
+class rohc_comp_header : public ActionPrimitive<> {
+  void operator ()() {
+    std::chrono::high_resolution_clock::time_point t1 =
+        std::chrono::high_resolution_clock::now();
+
+    PHV* phv = get_packet().get_phv();
+    size_t uncomp_headers_size = 0;
+    size_t first_header_size =	 0;
+
+    // Get the headers to compress skipping the first one
+    std::vector<Header*> uncomp_headers;
+    bool first_header = true;
+    for (auto it = phv->header_begin(); it != phv->header_end(); ++it) {
+      const Header &header = *it;
+      if (header.is_valid() && !header.is_metadata()) {
+	if(!first_header) {
+          uncomp_headers_size += header.get_nbytes_packet();
+          uncomp_headers.push_back((Header*) &header);
+        }
+        else {
+          first_header = false;
+          first_header_size = header.get_nbytes_packet();
+        }
+      }
+    }
+    size_t payload_size = phv->get_field("standard_metadata.packet_length")
+        .get_uint() - first_header_size - uncomp_headers_size;
+    size_t comp_header_size = 0;
+
+    unsigned char *uncomp_buff = new unsigned char [uncomp_headers_size];
+    unsigned char *comp_buff = new unsigned char [uncomp_headers_size
+                                                  + payload_size + 2];
+
+    // Initialize the compression data structures
+    int index_comp_buff = 0;
+    for(auto h : uncomp_headers) {
+      for (size_t f = 0; f < h->size(); ++f) {
+	  const char* data = h->get_field(f).get_bytes().data();
+	    for (int i = 0; i < (int) h->get_field(f).get_bytes().size(); ++i) {
+	      uncomp_buff[index_comp_buff] = *data;
+	      ++index_comp_buff;
+          ++data;
+        }
+      }
+      // Mark headers invalid so they won't be serialized
+      h->mark_invalid();
+    }
+
+    // Perform the header decompression
+    rohc_c_ent.compress_header(
+        comp_buff,
+        uncomp_buff,
+        &comp_header_size,
+        (size_t) uncomp_headers_size + payload_size);
+
+    comp_header_size -= payload_size;
+
+    // Positionate the head of the buffer to put the compressed header
+    // inside the payload
+    char *payload_start = get_packet().prepend(comp_header_size);
+    // Overwrite the packet headers with the compressed one
+    for (int i = 0; i < (int)comp_header_size; ++i){
+      payload_start[i] = comp_buff[i];
+    }
+
+    std::chrono::high_resolution_clock::time_point t2 =
+        std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>
+        (t2 - t1).count();
+    std::cout << "Compression execution time: " << duration << " useconds\n";
+
+  }
+};
+
+REGISTER_PRIMITIVE(rohc_comp_header);
+
+#define EXTRA_LENGHT_UNCOMP 80
+
+class rohc_decomp_header : public ActionPrimitive<> {
+  void operator ()() {
+    std::chrono::high_resolution_clock::time_point t1 =
+        std::chrono::high_resolution_clock::now();
+
+    // Calculate the size of all real header (not metadata) except the first one
+    PHV* phv = get_packet().get_phv();
+    std::vector<Header*> extracted_headers;
+    size_t headers_size = 0;
+    for (auto it = phv->header_begin(); it != phv->header_end(); ++it) {
+      const Header &header = *it;
+      if (header.is_valid() && !header.is_metadata()) {
+        extracted_headers.push_back((Header*) &header);
+        headers_size += header.get_nbytes_packet();
+      }
+    }
+
+    size_t comp_header_size = phv->get_field("standard_metadata.packet_length")
+        .get_uint() - headers_size;
+    size_t uncomp_header_size = 0;
+    unsigned char *comp_buff = new unsigned char [comp_header_size];
+    unsigned char *uncomp_buff = new unsigned char [comp_header_size +
+                                                    EXTRA_LENGHT_UNCOMP];
+
+    // Initialize the decompression data structures
+    int index_comp_buff = 0;
+    const char *c = get_packet().prepend(0);
+    for (int i = 0; i < (int) comp_header_size ; ++i) {
+      comp_buff[index_comp_buff] = *c;
+      ++index_comp_buff;
+      ++c;
+    }
+
+    // Perform the header decompression
+    rohc_d_ent.decompress_header(comp_buff,
+                                 uncomp_buff,
+                                 (size_t) comp_header_size,
+                                 &uncomp_header_size);
+
+    // Remove the compressed header inside the payload
+    get_packet().remove(comp_header_size);
+    // Positionate the head of the buffer to put the uncompressed
+    // header inside the payload
+    char *payload_start = get_packet().prepend(uncomp_header_size);
+    // Overwrite the packet headers with the uncompressed one
+    for (int i = 0; i < (int) uncomp_header_size; ++i)
+      payload_start[i] = uncomp_buff[i];
+
+    for (int i = extracted_headers.size() - 1; i >= 0; --i) {
+      payload_start = get_packet().prepend(extracted_headers[i]->
+          get_nbytes_packet());
+      extracted_headers[i]->deparse(payload_start);
+      extracted_headers[i]->mark_invalid();
+    }
+
+    std::chrono::high_resolution_clock::time_point t2 =
+        std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>
+        (t2 - t1).count();
+    std::cout << "Decompression execution time: " << duration << " useconds\n";
+
+  }
+};
+
+REGISTER_PRIMITIVE(rohc_decomp_header);
+
+class modify_and_resubmit : public ActionPrimitive<const Data &> {
+  void operator ()(const Data &field_list_id) {
+    if (get_phv().has_field("intrinsic_metadata.modify_and_resubmit_flag")) {
+      get_phv().get_field("intrinsic_metadata.modify_and_resubmit_flag")
+          .set(field_list_id);
+    }
+  }
+};
+
+REGISTER_PRIMITIVE(modify_and_resubmit);
 
 // dummy function, which ensures that this unit is not discarded by the linker
 // it is being called by the constructor of SimpleSwitch
