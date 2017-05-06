@@ -29,16 +29,18 @@
 #include <type_traits>
 #include <mutex>
 
+#include "packet.h"
 #include "actions.h"
 #include "named_p4object.h"
 
 namespace bm {
 
+class P4Objects;
 class ExternType;
 
 class ExternFactoryMap {
  public:
-  typedef std::function<std::unique_ptr<ExternType>()> ExternFactoryFn;
+  using ExternFactoryFn = std::function<std::unique_ptr<ExternType>()>;
 
   static ExternFactoryMap *get_instance();
 
@@ -51,32 +53,54 @@ class ExternFactoryMap {
   std::unordered_map<std::string, ExternFactoryFn> factory_map{};
 };
 
-#define BM_REGISTER_EXTERN(extern_name)                                 \
-  static_assert(std::is_default_constructible<extern_name>::value,      \
-                "User-defined extern type " #extern_name                \
+#define _BM_EXTERN_TO_STRING(name) #name
+
+#define BM_REGISTER_EXTERN_W_NAME(extern_name, extern__)                \
+  static_assert(std::is_default_constructible<extern__>::value,         \
+                "User-defined extern type " #extern__                   \
                 " needs to be default-constructible");                  \
   int _extern_##extern_name##_create_ =                                 \
       ::bm::ExternFactoryMap::get_instance()->register_extern_type(     \
            #extern_name,                                                \
-           [](){ return std::unique_ptr<ExternType>(new extern_name()); });
+           [](){ return std::unique_ptr<ExternType>(new extern__()); });
 
-#define BM_REGISTER_EXTERN_METHOD(extern_name, extern_method_name, ...) \
-  template <typename... Args>                                           \
-  struct _##extern_name##_##extern_method_name##_0                      \
-      : public ActionPrimitive<ExternType *, Args...> {                 \
-    void operator ()(ExternType *instance, Args... args) override {     \
-      auto lock = instance->_unique_lock();                             \
-      instance->_set_packet_ptr(&this->get_packet());                   \
+#define BM_REGISTER_EXTERN(extern_name) \
+  BM_REGISTER_EXTERN_W_NAME(extern_name, extern_name)
+
+#define BM_REGISTER_EXTERN_W_NAME_METHOD(extern_name, extern__,           \
+                                         extern_method_name, ...)         \
+  template <typename... Args>                                             \
+  struct _##extern_name##_##extern_method_name##_0                        \
+      : public ::bm::ActionPrimitive<::bm::ExternType *, Args...> {       \
+    void operator ()(::bm::ExternType *instance, Args... args) override { \
+      auto lock = instance->_unique_lock();                               \
+      instance->_set_packet_ptr(&this->get_packet());                     \
+      dynamic_cast<extern__ *>(instance)->extern_method_name(args...);    \
+    }                                                                     \
+  };                                                                      \
+  struct _##extern_name##_##extern_method_name                            \
+      : public _##extern_name##_##extern_method_name##_0<__VA_ARGS__> {}; \
+  REGISTER_PRIMITIVE_W_NAME(                                              \
+    _BM_EXTERN_TO_STRING(_##extern_name##_##extern_method_name),          \
+    _##extern_name##_##extern_method_name)
+
+#define BM_REGISTER_EXTERN_METHOD(extern_name, extern_method_name, ...)   \
+  template <typename... Args>                                             \
+  struct _##extern_name##_##extern_method_name##_0                        \
+      : public ::bm::ActionPrimitive<::bm::ExternType *, Args...> {       \
+    void operator ()(::bm::ExternType *instance, Args... args) override { \
+      auto lock = instance->_unique_lock();                               \
+      instance->_set_packet_ptr(&this->get_packet());                     \
       dynamic_cast<extern_name *>(instance)->extern_method_name(args...); \
-    }                                                                   \
-  };                                                                    \
-  struct _##extern_name##_##extern_method_name                          \
+    }                                                                     \
+  };                                                                      \
+  struct _##extern_name##_##extern_method_name                            \
       : public _##extern_name##_##extern_method_name##_0<__VA_ARGS__> {}; \
   REGISTER_PRIMITIVE(_##extern_name##_##extern_method_name)
 
 #define BM_EXTERN_ATTRIBUTES void _register_attributes() override
 
-#define BM_EXTERN_ATTRIBUTE_ADD(attr_name)                      \
+#define BM_EXTERN_ATTRIBUTE_ADD(attr_name) \
   _add_attribute(#attr_name, static_cast<void *>(&attr_name));
 
 
@@ -85,6 +109,11 @@ class ExternFactoryMap {
 class ExternType {
  public:
   virtual ~ExternType() { }
+
+  // needs to be called before init() when setting up the extern instance, in
+  // case init's implementation relies on p4objects (e.g. to resolve names to
+  // objects, such as register arrays)
+  void _set_p4objects(P4Objects *p4objects);
 
   template <typename T>
   void _set_attribute(const std::string &attr_name, const T &v) {
@@ -116,7 +145,9 @@ class ExternType {
     attributes[name] = ptr;
   }
 
-  Packet &get_packet() { return *pkt; }
+  Packet &get_packet() const { return *pkt; }
+
+  P4Objects &get_p4objects() const { return *p4objects; }
 
  private:
   // will use static_cast to cast from T * to void * and vice-versa
@@ -126,6 +157,11 @@ class ExternType {
   // set by _set_name_and_id
   std::string name{};
   p4object_id_t id{};
+  // while we improve the extern support in bmv2, it is useful to expose this to
+  // extern implementations, to give them maximum flexibility
+  // non-owning pointer, as ExternType instances themselves are owned by the
+  // P4Object instance
+  P4Objects *p4objects{nullptr};
 };
 
 }  // namespace bm

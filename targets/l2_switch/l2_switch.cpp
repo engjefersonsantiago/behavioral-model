@@ -24,6 +24,7 @@
 #include <bm/bm_sim/tables.h>
 #include <bm/bm_sim/switch.h>
 #include <bm/bm_sim/event_logger.h>
+#include <bm/bm_sim/logger.h>
 #include <bm/bm_sim/simple_pre.h>
 
 #include <bm/bm_runtime/bm_runtime.h>
@@ -61,7 +62,7 @@ class SimpleSwitch : public Switch {
     force_arith_header("intrinsic_metadata");
   }
 
-  int receive(int port_num, const char *buffer, int len) {
+  int receive_(int port_num, const char *buffer, int len) override {
     static int pkt_id = 0;
 
     auto packet = new_packet_ptr(port_num, pkt_id++, len,
@@ -73,7 +74,7 @@ class SimpleSwitch : public Switch {
     return 0;
   }
 
-  void start_and_return() {
+  void start_and_return_() override {
     std::thread t1(&SimpleSwitch::pipeline_thread, this);
     t1.detach();
     std::thread t2(&SimpleSwitch::transmit_thread, this);

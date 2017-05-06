@@ -47,15 +47,15 @@ namespace bm {
 class McSimplePre {
  public:
   //! NC
-  typedef unsigned int mgrp_t;
+  using mgrp_t = unsigned int;
   //! NC
-  typedef unsigned int rid_t;
+  using rid_t = unsigned int;
   //! NC
-  typedef unsigned int egress_port_t;
+  using egress_port_t = unsigned int;
 
-  typedef uintptr_t mgrp_hdl_t;
-  typedef uintptr_t l1_hdl_t;
-  typedef uintptr_t l2_hdl_t;
+  using mgrp_hdl_t = uintptr_t;
+  using l1_hdl_t = uintptr_t;
+  using l2_hdl_t = uintptr_t;
 
  public:
   enum McReturnCode {
@@ -63,7 +63,6 @@ class McSimplePre {
     TABLE_FULL,
     INVALID_MGID,
     INVALID_L1_HANDLE,
-    INVALID_L2_HANDLE,
     ERROR
   };
 
@@ -83,10 +82,10 @@ class McSimplePre {
 
  public:
   static constexpr size_t PORT_MAP_SIZE = 256;
-  typedef McPre::Set<PORT_MAP_SIZE> PortMap;
+  using PortMap = McPre::Set<PORT_MAP_SIZE>;
 
   static constexpr size_t LAG_MAP_SIZE = 256;
-  typedef McPre::Set<LAG_MAP_SIZE> LagMap;
+  using LagMap = McPre::Set<LAG_MAP_SIZE>;
 
   McSimplePre() {}
   McReturnCode mc_mgrp_create(const mgrp_t, mgrp_hdl_t *);
@@ -96,7 +95,6 @@ class McSimplePre {
                               l1_hdl_t *l1_hdl);
   McReturnCode mc_node_associate(const mgrp_hdl_t, const l1_hdl_t);
   McReturnCode mc_node_dissociate(const mgrp_hdl_t, const l1_hdl_t);
-  McReturnCode mc_node_disassociate(const mgrp_hdl_t, const l1_hdl_t);
   McReturnCode mc_node_destroy(const l1_hdl_t);
   McReturnCode mc_node_update(const l1_hdl_t l1_hdl,
                               const PortMap &port_map);
@@ -149,16 +147,19 @@ class McSimplePre {
     std::vector<l1_hdl_t> l1_list{};
 
     MgidEntry() {}
-    explicit MgidEntry(mgrp_t mgid) : mgid(mgid) {}
+    explicit MgidEntry(mgrp_t mgid)
+        : mgid(mgid) {}
   };
 
   struct L1Entry {
     mgrp_hdl_t mgrp_hdl{};
     rid_t rid{};
     l2_hdl_t l2_hdl{};
+    bool is_associated{false};
 
     L1Entry() {}
-    explicit L1Entry(rid_t rid) : rid(rid) {}
+    explicit L1Entry(rid_t rid)
+        : rid(rid) {}
   };
 
   struct L2Entry {
@@ -167,17 +168,11 @@ class McSimplePre {
     LagMap lag_map{};
 
     L2Entry() {}
-    L2Entry(l1_hdl_t l1_hdl,
-            const PortMap &port_map) :
-            l1_hdl(l1_hdl),
-            port_map(port_map) {}
+    L2Entry(l1_hdl_t l1_hdl, const PortMap &port_map)
+        : l1_hdl(l1_hdl), port_map(port_map) {}
 
-    L2Entry(l1_hdl_t l1_hdl,
-            const PortMap &port_map,
-            const LagMap &lag_map) :
-            l1_hdl(l1_hdl),
-            port_map(port_map),
-            lag_map(lag_map) {}
+    L2Entry(l1_hdl_t l1_hdl, const PortMap &port_map, const LagMap &lag_map)
+        : l1_hdl(l1_hdl), port_map(port_map), lag_map(lag_map) {}
   };
 
   // internal version, which does not acquire the lock
@@ -185,6 +180,9 @@ class McSimplePre {
 
   // does not acquire lock
   void get_entries_common(Json::Value *root) const;
+
+  // does not acquire lock
+  void node_dissociate(MgidEntry *mgid_entry, l1_hdl_t l1_hdl);
 
   std::unordered_map<mgrp_hdl_t, MgidEntry> mgid_entries{};
   std::unordered_map<l1_hdl_t, L1Entry> l1_entries{};

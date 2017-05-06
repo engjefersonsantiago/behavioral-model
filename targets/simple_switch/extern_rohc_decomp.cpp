@@ -13,12 +13,13 @@
  * limitations under the License.
  */
 
-/* P4 compatible extern type for ROHC header decompression 
+/* P4 compatible extern type for ROHC header decompression
  * Jeferson Santiago da Silva (eng.jefersonsantiago@gmail.com)
  */
 
 #include <chrono>
 
+#include <bm/bm_sim/packet.h>
 #include <bm/bm_sim/extern.h>
 #include <rohc/rohc_decompressor_module.h>
 
@@ -26,6 +27,7 @@
 #define EXTRA_LENGHT_UNCOMP 80
 
 using namespace std;
+using namespace bm;
 
 template <typename... Args>
 using ActionPrimitive = bm::ActionPrimitive<Args...>;
@@ -56,9 +58,8 @@ class ExternRohcDecompressor : public ExternType {
 
   // Decompressor primitive
   void rohc_decomp_header() {
-    std::chrono::high_resolution_clock::time_point t1 =
-        std::chrono::high_resolution_clock::now();   
-    
+    auto t1 = std::chrono::high_resolution_clock::now();
+
     // Calculate the size of all real header (not metadata) except the first one
     PHV* phv = get_packet().get_phv();
     std::vector<Header*> extracted_headers;
@@ -70,15 +71,15 @@ class ExternRohcDecompressor : public ExternType {
         headers_size += header.get_nbytes_packet();
       }
     }
-    
+
     size_t comp_header_size = phv->get_field("standard_metadata.packet_length")
         .get_uint() - headers_size;
     size_t uncomp_header_size = 0;
     unsigned char *comp_buff = new unsigned char [comp_header_size];
-    unsigned char *uncomp_buff = new unsigned char [comp_header_size + 
+    unsigned char *uncomp_buff = new unsigned char [comp_header_size +
                                                     EXTRA_LENGHT_UNCOMP];
-    
-    // Initialize the decompression data structures 
+
+    // Initialize the decompression data structures
     int index_comp_buff = 0;
     const char *c = get_packet().prepend(0);
     for (int i = 0; i < (int) comp_header_size ; ++i) {
@@ -86,44 +87,57 @@ class ExternRohcDecompressor : public ExternType {
       ++index_comp_buff;
       ++c;
     }
-    
+
     // Perform the header decompression
     rohc_d_ent.decompress_header(comp_buff,
                                  uncomp_buff,
                                  (size_t) comp_header_size,
                                  &uncomp_header_size);
-    
+
     // Remove the compressed header inside the payload
     get_packet().remove(comp_header_size);
-    // Positionate the head of the buffer to put the uncompressed 
+    // Positionate the head of the buffer to put the uncompressed
     // header inside the payload
     char *payload_start = get_packet().prepend(uncomp_header_size);
     // Overwrite the packet headers with the uncompressed one
     for (int i = 0; i < (int) uncomp_header_size; ++i)
-      payload_start[i] = uncomp_buff[i];	
-    
+      payload_start[i] = uncomp_buff[i];
+
+
+	//printf("Extracted header size: %lu\n", extracted_headers.size());
+
     for (int i = extracted_headers.size() - 1; i >= 0; --i) {
       payload_start = get_packet().prepend(extracted_headers[i]->
-          get_nbytes_packet());			
+          get_nbytes_packet());
       extracted_headers[i]->deparse(payload_start);
       extracted_headers[i]->mark_invalid();
     }
-    
-    std::chrono::high_resolution_clock::time_point t2 = 
-        std::chrono::high_resolution_clock::now();
+
+	//printf("----------------------------\n");
+	//printf("Packet buffer contains %lu bytes\n", get_packet().get_data_size());
+	//printf("----------------------------\n");
+	//char *data = get_packet().data();
+	//for (size_t i = 0; i < get_packet().get_data_size(); i++) {
+	//	if (i%8 == 0) printf("\n");
+	//	printf("0x%.2x ", (unsigned char)*data);
+	//	data++;
+	//}
+	//printf("\n----------------------------\n");
+
+    auto t2 = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>
         (t2 - t1).count();
     cout << "Decompression execution time: " << duration << " useconds\n";
- 
+
   }
 
   // Default constructor/destructor
   virtual ~ExternRohcDecompressor () {}
-  
+
  private:
   // declared attributes
   Data verbose{DEBUG_MODE};
-  
+
   // Stateful parameters
   bool dbg_en{true};
   RohcDecompressorEntity rohc_d_ent;

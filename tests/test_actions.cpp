@@ -20,21 +20,23 @@
 
 #include <gtest/gtest.h>
 
+#include <bm/bm_sim/actions.h>
+#include <bm/bm_sim/P4Objects.h>
+
 #include <memory>
 #include <chrono>
 #include <thread>
 #include <functional>
 
 #include <cassert>
-
-#include <bm/bm_sim/actions.h>
+#include <string>
 
 using namespace bm;
 
 // some primitive definitions for testing
 
 class SetField : public ActionPrimitive<Field &, const Data &> {
-  void operator ()(Field &f, const Data &d) {
+  void operator ()(Field &f, const Data &d) override {
     f.set(d);
   }
 };
@@ -43,7 +45,7 @@ REGISTER_PRIMITIVE(SetField);
 
 // more general Set operation, which can take any writable Data type
 class Set : public ActionPrimitive<Data &, const Data &> {
-  void operator ()(Data &f, const Data &d) {
+  void operator ()(Data &f, const Data &d) override {
     f.set(d);
   }
 };
@@ -51,7 +53,7 @@ class Set : public ActionPrimitive<Data &, const Data &> {
 REGISTER_PRIMITIVE(Set);
 
 class Add : public ActionPrimitive<Field &, const Data &, const Data &> {
-  void operator ()(Field &f, const Data &d1, const Data &d2) {
+  void operator ()(Field &f, const Data &d1, const Data &d2) override {
     f.add(d1, d2);
   }
 };
@@ -59,7 +61,7 @@ class Add : public ActionPrimitive<Field &, const Data &, const Data &> {
 REGISTER_PRIMITIVE(Add);
 
 class RemoveHeader : public ActionPrimitive<Header &> {
-  void operator ()(Header &hdr) {
+  void operator ()(Header &hdr) override {
     hdr.mark_invalid();
   }
 };
@@ -67,11 +69,11 @@ class RemoveHeader : public ActionPrimitive<Header &> {
 REGISTER_PRIMITIVE(RemoveHeader);
 
 class CopyHeader : public ActionPrimitive<Header &, const Header &> {
-  void operator ()(Header &dst, const Header &src) {
-    if(!src.is_valid()) return;
+  void operator ()(Header &dst, const Header &src) override {
+    if (!src.is_valid()) return;
     dst.mark_valid();
     assert(dst.get_header_type_id() == src.get_header_type_id());
-    for(unsigned int i = 0; i < dst.size(); i++) {
+    for (size_t i = 0; i < dst.size(); i++) {
       dst[i].set(src[i]);
     }
   }
@@ -82,7 +84,7 @@ REGISTER_PRIMITIVE(CopyHeader);
 /* this is an example of primitive that can be used to set known control
    registers, e.g. a drop() primitive that would set a drop metadata bit flag */
 class CRSet : public ActionPrimitive<> {
-  void operator ()() {
+  void operator ()() override {
     get_field("test1.f16").set(666);
   }
 };
@@ -91,7 +93,7 @@ REGISTER_PRIMITIVE(CRSet);
 
 /* this is an example of primitive which uses header stacks */
 class Pop : public ActionPrimitive<HeaderStack &> {
-  void operator ()(HeaderStack &stack) {
+  void operator ()(HeaderStack &stack) override {
     stack.pop_front();
   }
 };
@@ -101,9 +103,10 @@ REGISTER_PRIMITIVE(Pop);
 /* implementation of old primitive modify_field_with_hash_based_offset */
 class ModifyFieldWithHashBasedOffset
   : public ActionPrimitive<Field &, const Data &,
-			   const NamedCalculation &, const Data &> {
+                           const NamedCalculation &, const Data &> {
   void operator ()(Field &dst, const Data &base,
-		   const NamedCalculation &hash, const Data &size) {
+                   const NamedCalculation &hash,
+                   const Data &size) override {
     uint64_t v =
       (hash.output(get_packet()) + base.get<uint64_t>()) % size.get<uint64_t>();
     dst.set(v);
@@ -112,8 +115,10 @@ class ModifyFieldWithHashBasedOffset
 
 REGISTER_PRIMITIVE(ModifyFieldWithHashBasedOffset);
 
-class ExecuteMeter : public ActionPrimitive<Field &, MeterArray &, const Data &> {
-  void operator ()(Field &dst, MeterArray &meter_array, const Data &idx) {
+class ExecuteMeter
+    : public ActionPrimitive<Field &, MeterArray &, const Data &> {
+  void operator ()(Field &dst, MeterArray &meter_array,
+                   const Data &idx) override {
     dst.set(meter_array.execute_meter(get_packet(), idx.get_uint()));
   }
 };
@@ -122,12 +127,64 @@ REGISTER_PRIMITIVE(ExecuteMeter);
 
 // illustrates how a packet general purpose register can be used in a primitive
 class WritePacketRegister : public ActionPrimitive<const Data &> {
-  void operator ()(const Data &v) {
+  void operator ()(const Data &v) override {
     get_packet().set_register(0, v.get<uint64_t>());
   }
 };
 
 REGISTER_PRIMITIVE(WritePacketRegister);
+
+class _nop : public ActionPrimitive<> {
+  void operator ()() override {}
+};
+
+REGISTER_PRIMITIVE(_nop);
+
+class SaveStringIface {
+ public:
+  virtual std::string get_saved_string() const = 0;
+};
+
+class SaveString
+    : public ActionPrimitive<const std::string &>, public SaveStringIface {
+  void operator ()(const std::string &s) override {
+    s_ = s;
+  }
+
+  std::string s_;
+
+ public:
+  std::string get_saved_string() const override { return s_; }
+};
+
+REGISTER_PRIMITIVE(SaveString);
+
+class SaveCString
+    : public ActionPrimitive<const char *>, public SaveStringIface {
+  void operator ()(const char *s) override {
+    s_ = s;
+  }
+
+  const char *s_;
+
+ public:
+  std::string get_saved_string() const override { return std::string(s_); }
+};
+
+REGISTER_PRIMITIVE(SaveCString);
+
+class HeaderUnionAsParameter : public ActionPrimitive<const HeaderUnion &> {
+  void operator ()(const HeaderUnion &hu) override {
+    union_name = hu.get_name();
+  }
+
+  std::string union_name;
+
+ public:
+  std::string get_union_name() const { return union_name; }
+};
+
+REGISTER_PRIMITIVE(HeaderUnionAsParameter);
 
 // Google Test fixture for actions tests
 class ActionsTest : public ::testing::Test {
@@ -138,8 +195,11 @@ class ActionsTest : public ::testing::Test {
   HeaderType testHeaderType;
   header_id_t testHeader1{0}, testHeader2{1};
   header_id_t testHeaderS0{2}, testHeaderS1{3};
+  header_id_t testHeaderU0{4}, testHeaderU1{5};
 
   header_stack_id_t testHeaderStack{0};
+
+  header_union_id_t testHeaderUnion{0};
 
   ActionFn testActionFn;
   ActionFnEntry testActionFnEntry;
@@ -152,7 +212,7 @@ class ActionsTest : public ::testing::Test {
 
   ActionsTest()
       : testHeaderType("test_t", 0),
-        testActionFn("test_action", 0),
+        testActionFn("test_action", 0, 1),
         testActionFnEntry(&testActionFn),
         phv_source(PHVSourceIface::make_phv_source()) {
     testHeaderType.push_back_field("f32", 32);
@@ -167,8 +227,13 @@ class ActionsTest : public ::testing::Test {
     phv_factory.push_back_header("testS0", testHeaderS0, testHeaderType);
     phv_factory.push_back_header("testS1", testHeaderS1, testHeaderType);
     phv_factory.push_back_header_stack("test_stack", testHeaderStack,
-				       testHeaderType,
-				       {testHeaderS0, testHeaderS1});
+                                       testHeaderType,
+                                       {testHeaderS0, testHeaderS1});
+
+    phv_factory.push_back_header("testU0", testHeaderU0, testHeaderType);
+    phv_factory.push_back_header("testU1", testHeaderU1, testHeaderType);
+    phv_factory.push_back_header_union("test_union", testHeaderUnion,
+                                       {testHeaderU0, testHeaderU1});
   }
 
   virtual void SetUp() {
@@ -181,69 +246,62 @@ class ActionsTest : public ::testing::Test {
   virtual void TearDown() { }
 };
 
-// TODO(antonin)
-// TEST_F(ActionsTest, NumParams) {
-//   Data value(0xaba);
-//   SetField primitive;
-//   testActionFn.push_back_primitive(&primitive);
-//   testActionFn.parameter_push_back_field(testHeader1, 3); // f16
-//   testActionFn.parameter_push_back_const(value);
-
-//   ASSERT_EQ(2u, testActionFn.num_params());
-// }
+TEST_F(ActionsTest, NumParams) {
+  ASSERT_EQ(1u, testActionFn.get_num_params());
+}
 
 TEST_F(ActionsTest, SetFromConst) {
   Data value(0xaba);
   SetField primitive;
   testActionFn.push_back_primitive(&primitive);
-  testActionFn.parameter_push_back_field(testHeader1, 3); // f16
+  testActionFn.parameter_push_back_field(testHeader1, 3);  // f16
   testActionFn.parameter_push_back_const(value);
 
-  Field &f = phv->get_field(testHeader1, 3); // f16
+  Field &f = phv->get_field(testHeader1, 3);  // f16
   f.set(0);
 
-  ASSERT_EQ((unsigned) 0, f.get_uint());
+  ASSERT_EQ(0u, f.get_uint());
 
   testActionFnEntry(pkt.get());
 
-  ASSERT_EQ((unsigned) 0xaba, f.get_uint());
+  ASSERT_EQ(0xabau, f.get_uint());
 }
 
 TEST_F(ActionsTest, SetFromActionData) {
   Data value(0xaba);
   SetField primitive;
   testActionFn.push_back_primitive(&primitive);
-  testActionFn.parameter_push_back_field(testHeader1, 3); // f16
+  testActionFn.parameter_push_back_field(testHeader1, 3);  // f16
   testActionFn.parameter_push_back_action_data(0);
   testActionFnEntry.push_back_action_data(value);
 
-  Field &f = phv->get_field(testHeader1, 3); // f16
+  Field &f = phv->get_field(testHeader1, 3);  // f16
   f.set(0);
 
-  ASSERT_EQ((unsigned) 0, f.get_uint());
+  ASSERT_EQ(0u, f.get_uint());
 
   testActionFnEntry(pkt.get());
 
-  ASSERT_EQ((unsigned) 0xaba, f.get_uint());
+  ASSERT_EQ(0xabau, f.get_uint());
 }
 
 TEST_F(ActionsTest, SetFromField) {
   SetField primitive;
   testActionFn.push_back_primitive(&primitive);
-  testActionFn.parameter_push_back_field(testHeader1, 3); // f16
-  testActionFn.parameter_push_back_field(testHeader1, 0); // f32
+  testActionFn.parameter_push_back_field(testHeader1, 3);  // f16
+  testActionFn.parameter_push_back_field(testHeader1, 0);  // f32
 
-  Field &src = phv->get_field(testHeader1, 0); // 32
+  Field &src = phv->get_field(testHeader1, 0);  // 32
   src.set(0xaba);
 
-  Field &dst = phv->get_field(testHeader1, 3); // f16
+  Field &dst = phv->get_field(testHeader1, 3);  // f16
   dst.set(0);
 
-  ASSERT_EQ((unsigned) 0, dst.get_uint());
+  ASSERT_EQ(0u, dst.get_uint());
 
   testActionFnEntry(pkt.get());
 
-  ASSERT_EQ((unsigned) 0xaba, dst.get_uint());
+  ASSERT_EQ(0xabau, dst.get_uint());
 }
 
 TEST_F(ActionsTest, SetFromRegisterRef) {
@@ -254,10 +312,10 @@ TEST_F(ActionsTest, SetFromRegisterRef) {
   const unsigned int register_idx = 68;
   SetField primitive;
   testActionFn.push_back_primitive(&primitive);
-  testActionFn.parameter_push_back_field(testHeader1, 3); // f16
+  testActionFn.parameter_push_back_field(testHeader1, 3);  // f16
   testActionFn.parameter_push_back_register_ref(&register_array, register_idx);
 
-  Field &dst = phv->get_field(testHeader1, 3); // f16
+  Field &dst = phv->get_field(testHeader1, 3);  // f16
   dst.set(0);
 
   register_array.at(register_idx).set(value_i);
@@ -276,24 +334,24 @@ TEST_F(ActionsTest, SetFromRegisterGen) {
 
   // the register index is an expression
   std::unique_ptr<ArithExpression> expr_idx(new ArithExpression());
-  expr_idx->push_back_load_field(testHeader1, 0); // f32
+  expr_idx->push_back_load_field(testHeader1, 0);  // f32
   expr_idx->push_back_load_const(Data(1));
   expr_idx->push_back_op(ExprOpcode::ADD);
   expr_idx->build();
 
   const unsigned int register_idx = 68;
-  Field &f_idx = phv->get_field(testHeader1, 0); // f32
+  Field &f_idx = phv->get_field(testHeader1, 0);  // f32
   f_idx.set(register_idx - 1);
 
   unsigned int value_i(0xaba);
 
   SetField primitive;
   testActionFn.push_back_primitive(&primitive);
-  testActionFn.parameter_push_back_field(testHeader1, 3); // f16
+  testActionFn.parameter_push_back_field(testHeader1, 3);  // f16
   testActionFn.parameter_push_back_register_gen(&register_array,
                                                 std::move(expr_idx));
 
-  Field &dst = phv->get_field(testHeader1, 3); // f16
+  Field &dst = phv->get_field(testHeader1, 3);  // f16
   dst.set(0);
 
   register_array.at(register_idx).set(value_i);
@@ -307,43 +365,63 @@ TEST_F(ActionsTest, SetFromRegisterGen) {
 
 TEST_F(ActionsTest, SetFromExpression) {
   std::unique_ptr<ArithExpression> expr(new ArithExpression());
-  expr->push_back_load_field(testHeader1, 0); // f32
+  expr->push_back_load_field(testHeader1, 0);  // f32
   expr->push_back_load_const(Data(1));
   expr->push_back_op(ExprOpcode::ADD);
   expr->build();
 
   SetField primitive;
   testActionFn.push_back_primitive(&primitive);
-  testActionFn.parameter_push_back_field(testHeader1, 3); // f16
+  testActionFn.parameter_push_back_field(testHeader1, 3);  // f16
   testActionFn.parameter_push_back_expression(std::move(expr));
 
   Field &f32 = phv->get_field(testHeader1, 0);
   f32.set(0xaba);
 
-  Field &dst = phv->get_field(testHeader1, 3); // f16
+  Field &dst = phv->get_field(testHeader1, 3);  // f16
   dst.set(0);
 
-  ASSERT_EQ((unsigned) 0, dst.get_uint());
+  ASSERT_EQ(0u, dst.get_uint());
 
   testActionFnEntry(pkt.get());
 
-  ASSERT_EQ((unsigned) 0xabb, dst.get_uint());
+  ASSERT_EQ(0xabbu, dst.get_uint());
+}
+
+TEST_F(ActionsTest, SetFromLastStackField) {
+  HeaderStack &stack = phv->get_header_stack(testHeaderStack);
+  ASSERT_EQ(1u, stack.push_back());
+
+  SetField primitive;
+  testActionFn.push_back_primitive(&primitive);
+  testActionFn.parameter_push_back_field(testHeader1, 3);  // f16
+  // f32
+  testActionFn.parameter_push_back_last_header_stack_field(testHeaderStack, 0);
+
+  auto &src = phv->get_field(testHeaderS0, 0);
+  auto &dst = phv->get_field(testHeader1, 3);
+  dst.set(0);
+  src.set(0xaba);
+
+  testActionFnEntry(pkt.get());
+
+  ASSERT_EQ(0xaba, dst.get<int>());
 }
 
 TEST_F(ActionsTest, SetFromConstStress) {
   Data value(0xaba);
   SetField primitive;
   testActionFn.push_back_primitive(&primitive);
-  testActionFn.parameter_push_back_field(testHeader1, 3); // f16
+  testActionFn.parameter_push_back_field(testHeader1, 3);  // f16
   testActionFn.parameter_push_back_const(value);
 
-  Field &f = phv->get_field(testHeader1, 3); // f16
+  Field &f = phv->get_field(testHeader1, 3);  // f16
 
-  for(int i = 0; i < 100000; i++) {
+  for (int i = 0; i < 100000; i++) {
     f.set(0);
-    ASSERT_EQ((unsigned) 0, f.get_uint());
+    ASSERT_EQ(0u, f.get_uint());
     testActionFnEntry(pkt.get());
-    ASSERT_EQ((unsigned) 0xaba, f.get_uint());
+    ASSERT_EQ(0xabau, f.get_uint());
   }
 }
 
@@ -352,10 +430,10 @@ TEST_F(ActionsTest, Set) {
   Data value(value_i);
   Set primitive;
   testActionFn.push_back_primitive(&primitive);
-  testActionFn.parameter_push_back_field(testHeader1, 3); // f16
+  testActionFn.parameter_push_back_field(testHeader1, 3);  // f16
   testActionFn.parameter_push_back_const(value);
 
-  Field &f = phv->get_field(testHeader1, 3); // f16
+  Field &f = phv->get_field(testHeader1, 3);  // f16
 
   f.set(0);
   ASSERT_EQ(0u, f.get_uint());
@@ -386,13 +464,13 @@ TEST_F(ActionsTest, SetRegisterGen) {
 
   // the register index is an expression
   std::unique_ptr<ArithExpression> expr_idx(new ArithExpression());
-  expr_idx->push_back_load_field(testHeader1, 0); // f32
+  expr_idx->push_back_load_field(testHeader1, 0);  // f32
   expr_idx->push_back_load_const(Data(1));
   expr_idx->push_back_op(ExprOpcode::ADD);
   expr_idx->build();
 
   const unsigned int register_idx = 68;
-  Field &f_idx = phv->get_field(testHeader1, 0); // f32
+  Field &f_idx = phv->get_field(testHeader1, 0);  // f32
   f_idx.set(register_idx - 1);
 
   unsigned int value_i(0xaba);
@@ -415,11 +493,11 @@ TEST_F(ActionsTest, CopyHeader) {
   Header &hdr2 = phv->get_header(testHeader2);
   ASSERT_FALSE(hdr2.is_valid());
 
-  for(unsigned int i = 0; i < hdr1.size(); i++) {
+  for (unsigned int i = 0; i < hdr1.size(); i++) {
     hdr1[i].set(0);
   }
 
-  for(unsigned int i = 0; i < hdr2.size(); i++) {
+  for (unsigned int i = 0; i < hdr2.size(); i++) {
     hdr2[i].set(i + 1);
   }
 
@@ -427,18 +505,19 @@ TEST_F(ActionsTest, CopyHeader) {
   testActionFn.push_back_primitive(&primitive);
   testActionFn.parameter_push_back_header(testHeader1);
   testActionFn.parameter_push_back_header(testHeader2);
-  
+
   testActionFnEntry(pkt.get());
   ASSERT_FALSE(hdr1.is_valid());
   ASSERT_FALSE(hdr2.is_valid());
-  for(unsigned int i = 0; i < hdr2.size(); i++) {
+  for (unsigned int i = 0; i < hdr2.size(); i++) {
     ASSERT_EQ(0u, hdr1[i].get_uint());
   }
 
   hdr2.mark_valid();
   testActionFnEntry(pkt.get());
   ASSERT_TRUE(hdr1.is_valid());
-  for(unsigned int i = 0; i < hdr1.size(); i++) {
+  for (unsigned int i = 0; i < hdr1.size(); i++) {
+    if (hdr1[i].is_hidden()) break;
     ASSERT_EQ(i + 1, hdr1[i].get_uint());
   }
 }
@@ -447,14 +526,14 @@ TEST_F(ActionsTest, CRSet) {
   CRSet primitive;
   testActionFn.push_back_primitive(&primitive);
 
-  Field &f = phv->get_field(testHeader1, 3); // f16
+  Field &f = phv->get_field(testHeader1, 3);  // f16
   f.set(0);
 
-  ASSERT_EQ((unsigned) 0, f.get_uint());
+  ASSERT_EQ(0u, f.get_uint());
 
   testActionFnEntry(pkt.get());
 
-  ASSERT_EQ((unsigned) 666, f.get_uint());
+  ASSERT_EQ(666u, f.get_uint());
 }
 
 TEST_F(ActionsTest, Pop) {
@@ -472,7 +551,7 @@ TEST_F(ActionsTest, Pop) {
 
 TEST_F(ActionsTest, ModifyFieldWithHashBasedOffset) {
   uint64_t base = 100;
-  uint64_t size = 65536; // 16 bits
+  uint64_t size = 65536;  // 16 bits
 
   BufBuilder builder;
   builder.push_back_field(testHeader1, 0);
@@ -481,7 +560,7 @@ TEST_F(ActionsTest, ModifyFieldWithHashBasedOffset) {
 
   ModifyFieldWithHashBasedOffset primitive;
   testActionFn.push_back_primitive(&primitive);
-  testActionFn.parameter_push_back_field(testHeader2, 3); // f16
+  testActionFn.parameter_push_back_field(testHeader2, 3);  // f16
   testActionFn.parameter_push_back_const(Data(base));
   testActionFn.parameter_push_back_calculation(&calculation);
   testActionFn.parameter_push_back_const(Data(size));
@@ -493,13 +572,14 @@ TEST_F(ActionsTest, ModifyFieldWithHashBasedOffset) {
 }
 
 TEST_F(ActionsTest, ExecuteMeter) {
-  typedef MeterArray::MeterErrorCode MeterErrorCode;
-  typedef MeterArray::color_t color_t;
+  using MeterErrorCode = MeterArray::MeterErrorCode;
+  using color_t = MeterArray::color_t;
   MeterErrorCode rc;
   const color_t GREEN = 0;
   const color_t RED = 1;
 
-  MeterArray meter_array("meter_test", 0, MeterArray::MeterType::PACKETS, 1, 64);
+  MeterArray meter_array(
+      "meter_test", 0, MeterArray::MeterType::PACKETS, 1, 64);
   // 10 packets per second, burst size of 5
   MeterArray::rate_config_t rate = {0.00001, 5};
   rc = meter_array.set_rates({rate});
@@ -507,20 +587,20 @@ TEST_F(ActionsTest, ExecuteMeter) {
 
   ExecuteMeter primitive;
   testActionFn.push_back_primitive(&primitive);
-  testActionFn.parameter_push_back_field(testHeader1, 0); // f32
+  testActionFn.parameter_push_back_field(testHeader1, 0);  // f32
   testActionFn.parameter_push_back_meter_array(&meter_array);
-  testActionFn.parameter_push_back_const(Data(16u)); // idx
+  testActionFn.parameter_push_back_const(Data(16u));  // idx
 
   const Field &fdst = phv->get_field(testHeader1, 0);
 
   // send 5 packets very quickly, it is less than the burst size, so all packets
   // should be marked GREEN
-  for(int i = 0; i < 5; i++) {
+  for (int i = 0; i < 5; i++) {
       testActionFnEntry(pkt.get());
       ASSERT_EQ(GREEN, fdst.get_uint());
   }
   // after the burst size, packets should be marked RED
-  for(int i = 0; i < 5; i++) {
+  for (int i = 0; i < 5; i++) {
       testActionFnEntry(pkt.get());
       ASSERT_EQ(RED, fdst.get_uint());
   }
@@ -542,39 +622,66 @@ TEST_F(ActionsTest, WritePacketRegister) {
   ASSERT_EQ(v, pkt->get_register(idx));
 }
 
-TEST_F(ActionsTest, TwoPrimitives) {
-  SetField primitive;
+TEST_F(ActionsTest, HeaderUnion) {
+  HeaderUnionAsParameter primitive;
   testActionFn.push_back_primitive(&primitive);
-  testActionFn.parameter_push_back_field(testHeader1, 3); // f16
-  testActionFn.parameter_push_back_field(testHeader1, 0); // f32
-  testActionFn.push_back_primitive(&primitive);
-  testActionFn.parameter_push_back_field(testHeader2, 3); // f16
-  testActionFn.parameter_push_back_field(testHeader2, 0); // f32
-
-  Field &src1 = phv->get_field(testHeader1, 0); // 32
-  Field &src2 = phv->get_field(testHeader2, 0); // 32
-  src1.set(0xaba); src2.set(0xaba);
-
-  Field &dst1 = phv->get_field(testHeader1, 3); // f16
-  Field &dst2 = phv->get_field(testHeader2, 3); // f16
-  dst1.set(0); dst2.set(0);
-
-  ASSERT_EQ((unsigned) 0, dst1.get_uint());
-  ASSERT_EQ((unsigned) 0, dst2.get_uint());
+  testActionFn.parameter_push_back_header_union(testHeaderUnion);
 
   testActionFnEntry(pkt.get());
 
-  ASSERT_EQ((unsigned) 0xaba, dst1.get_uint());
-  ASSERT_EQ((unsigned) 0xaba, dst2.get_uint());
+  EXPECT_EQ("test_union", primitive.get_union_name());
 }
 
-extern bool WITH_VALGRIND; // defined in main.cpp
+template <typename Primitive>
+class ActionsStringParamTest : public ActionsTest {
+ protected:
+  Primitive primitive;
+};
+
+using SaveStringTypes = ::testing::Types<SaveString, SaveCString>;
+TYPED_TEST_CASE(ActionsStringParamTest, SaveStringTypes);
+
+TYPED_TEST(ActionsStringParamTest, Basic) {
+  const std::string testString("testString");
+  this->testActionFn.push_back_primitive(&this->primitive);
+  this->testActionFn.parameter_push_back_string(testString);
+  this->testActionFnEntry(this->pkt.get());
+  ASSERT_EQ(testString, this->primitive.get_saved_string());
+}
+
+TEST_F(ActionsTest, TwoPrimitives) {
+  SetField primitive;
+  testActionFn.push_back_primitive(&primitive);
+  testActionFn.parameter_push_back_field(testHeader1, 3);  // f16
+  testActionFn.parameter_push_back_field(testHeader1, 0);  // f32
+  testActionFn.push_back_primitive(&primitive);
+  testActionFn.parameter_push_back_field(testHeader2, 3);  // f16
+  testActionFn.parameter_push_back_field(testHeader2, 0);  // f32
+
+  Field &src1 = phv->get_field(testHeader1, 0);  // 32
+  Field &src2 = phv->get_field(testHeader2, 0);  // 32
+  src1.set(0xaba); src2.set(0xaba);
+
+  Field &dst1 = phv->get_field(testHeader1, 3);  // f16
+  Field &dst2 = phv->get_field(testHeader2, 3);  // f16
+  dst1.set(0); dst2.set(0);
+
+  ASSERT_EQ(0u, dst1.get_uint());
+  ASSERT_EQ(0u, dst2.get_uint());
+
+  testActionFnEntry(pkt.get());
+
+  ASSERT_EQ(0xabau, dst1.get_uint());
+  ASSERT_EQ(0xabau, dst2.get_uint());
+}
+
+extern bool WITH_VALGRIND;  // defined in main.cpp
 
 // added this test after I found a race condition when the same action primitive
 // is executed by 2 different threads
 TEST_F(ActionsTest, ConcurrentPrimitiveExecution) {
   uint64_t base = 100;
-  uint64_t size = 65536; // 16 bits
+  uint64_t size = 65536;  // 16 bits
 
   BufBuilder builder;
   builder.push_back_field(testHeader1, 0);
@@ -584,8 +691,8 @@ TEST_F(ActionsTest, ConcurrentPrimitiveExecution) {
   auto primitive = ActionOpcodesMap::get_instance()->get_primitive(
       "ModifyFieldWithHashBasedOffset");
 
-  testActionFn.push_back_primitive(primitive);
-  testActionFn.parameter_push_back_field(testHeader2, 3); // f16
+  testActionFn.push_back_primitive(primitive.get());
+  testActionFn.parameter_push_back_field(testHeader2, 3);  // f16
   testActionFn.parameter_push_back_const(Data(base));
   testActionFn.parameter_push_back_calculation(&calculation);
   testActionFn.parameter_push_back_const(Data(size));
@@ -620,7 +727,7 @@ TEST_F(ActionsTest, ConcurrentRegisterPrimitiveExecution) {
 
   auto primitive = ActionOpcodesMap::get_instance()->get_primitive("Set");
 
-  testActionFn.push_back_primitive(primitive);
+  testActionFn.push_back_primitive(primitive.get());
   testActionFn.parameter_push_back_register_ref(&register_array, 12);
   testActionFn.parameter_push_back_const(Data(0xabababab));
 
@@ -639,14 +746,29 @@ TEST_F(ActionsTest, ConcurrentRegisterPrimitiveExecution) {
   t1.join(); t2.join();
 }
 
-class RegisterSpin : public ActionPrimitive<RegisterArray &, const Data &> {
-  void operator ()(RegisterArray &register_array, const Data &ts) {
-    register_array.at(0).set(ts);
-    std::this_thread::sleep_for(std::chrono::milliseconds(ts.get_uint()));
-  }
-};
+TEST_F(ActionsTest, UniquePrimitivesForEachP4Objects) {
+  // NOLINTNEXTLINE(whitespace/line_length)
+  std::istringstream first_is("{\"actions\":[{\"name\":\"nop\",\"id\":2,\"runtime_data\":[],\"primitives\":[{\"op\":\"_nop\",\"parameters\":[]}]}]}");
+  std::stringstream first_os;
+  P4Objects first_objects(first_os);
+  LookupStructureFactory first_factory;
+  ASSERT_EQ(0, first_objects.init_objects(&first_is, &first_factory));
 
-REGISTER_PRIMITIVE(RegisterSpin);
+  // NOLINTNEXTLINE(whitespace/line_length)
+  std::istringstream second_is("{\"actions\":[{\"name\":\"nop\",\"id\":2,\"runtime_data\":[],\"primitives\":[{\"op\":\"_nop\",\"parameters\":[]}]}]}");
+  std::stringstream second_os;
+  P4Objects second_objects(second_os);
+  LookupStructureFactory second_factory;
+  ASSERT_EQ(0, second_objects.init_objects(&second_is, &second_factory));
+
+  // check primitives are unique across p4objects instances
+  ASSERT_NE(first_objects.get_primitive(std::string("_nop")),
+            second_objects.get_primitive(std::string("_nop")));
+
+  // check only one copy of a primitive for one p4objects instance
+  ASSERT_EQ(first_objects.get_primitive(std::string("_nop")),
+            first_objects.get_primitive(std::string("_nop")));
+}
 
 class ActionsTestRegisterProtection : public ActionsTest {
  protected:
@@ -657,16 +779,18 @@ class ActionsTestRegisterProtection : public ActionsTest {
 
   RegisterArray register_array_1;
 
-  RegisterSpin primitive_spin;
+  std::unique_ptr<ActionPrimitive_> primitive_spin;
 
   ActionFn testActionFn_2;
   ActionFnEntry testActionFnEntry_2;
 
   ActionsTestRegisterProtection()
       : ActionsTest(),
-        testActionFn_2("test_action_2", 1),
-        testActionFnEntry_2(&testActionFn_2),
-        register_array_1("register_test_1", 0, register_size, register_bw) {
+        register_array_1("register_test_1", 0, register_size, register_bw),
+        primitive_spin(ActionOpcodesMap::get_instance()->get_primitive(
+            "RegisterSpin")),
+        testActionFn_2("test_action_2", 1, 0),
+        testActionFnEntry_2(&testActionFn_2) {
     configure_one_action(&testActionFn, &register_array_1);
   }
 
@@ -678,7 +802,7 @@ class ActionsTestRegisterProtection : public ActionsTest {
 
   void configure_one_action(ActionFn *action_fn,
                             RegisterArray *register_array) {
-    action_fn->push_back_primitive(&primitive_spin);
+    action_fn->push_back_primitive(primitive_spin.get());
     action_fn->parameter_push_back_register_array(register_array);
     action_fn->parameter_push_back_const(Data(msecs_to_sleep));
   }

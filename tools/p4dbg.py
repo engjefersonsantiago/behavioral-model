@@ -51,6 +51,7 @@ args = parser.parse_args()
 class FieldMap:
     def __init__(self):
         self.reset()
+        self.hidden_fields = [("$valid$", 1, False)]
 
     def reset(self):
         self.fields = {}
@@ -61,19 +62,33 @@ class FieldMap:
         header_types_map = {}
         json_ = json.loads(json_cfg)
 
+        # special case where the switch was started with an empty config
+        if len(json_.keys()) == 0:
+            return
+
         header_types = json_["header_types"]
         for h in header_types:
             header_type = h["name"]
             header_types_map[header_type] = h
 
         header_instances = json_["headers"]
+
+        def add_field(idx, t):
+            f_name, f_nbits = t[0], t[1]
+            e = (".".join([header, f_name]), f_nbits)
+            self.fields[(h["id"], idx)] = e
+            self.fields_rev[e[0]] = (h["id"], idx)
+
         for h in header_instances:
             header = h["name"]
             header_type = header_types_map[h["header_type"]]
-            for idx, (f_name, f_nbits) in enumerate(header_type["fields"]):
-                e = (".".join([header, f_name]), f_nbits)
-                self.fields[(h["id"], idx)] = e
-                self.fields_rev[e[0]] = (h["id"], idx)
+            idx = 0
+            for t in header_type["fields"]:
+                add_field(idx, t)
+                idx += 1
+            for t in self.hidden_fields:
+                add_field(idx, t)
+                idx += 1
 
     def get_name(self, header_id, offset):
         return self.fields[(header_id, offset)][0]
@@ -158,6 +173,11 @@ class ObjectMap:
 
     def load_names(self, json_cfg):
         json_ = json.loads(json_cfg)
+
+        # special case where the switch was started with an empty config
+        if len(json_.keys()) == 0:
+            return
+
         for type_ in {"parser", "deparser", "action", "pipeline"}:
             _map = self.store[type_]
             _map.pname = type_
@@ -264,9 +284,9 @@ def make_extract_function(P, fmt):
             offset += width
             setattr(self, name, v)
             if type(uf) is int:
-                if width == 0:
-                    v_str = None
-                    v_int = None
+                if width == 0:  # supports VL fields with width 0
+                    v_str = 'Empty'
+                    v_int = 0
                 else:
                     v_str = ':'.join(x.encode('hex') for x in v)
                     v_int = int(v.encode('hex'), 16)

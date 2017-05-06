@@ -131,6 +131,12 @@ class LookupStructure {
   //! Ternary structure.
   virtual bool entry_exists(const K &key) const = 0;
 
+  //! Retrieve the handle of an entry. Returns true if and only if an entry
+  //! exists. See entry_exists() for more information about the notion of entry
+  //! existence.
+  virtual bool retrieve_handle(const K &key,
+                               internal_handle_t *handle) const = 0;
+
   //! Store an entry in the lookup structure. Associates the given handle
   //! with the given entry.
   virtual void add_entry(const K &key, internal_handle_t handle) = 0;
@@ -143,12 +149,12 @@ class LookupStructure {
   virtual void clear() = 0;
 };
 
-// Convenience typedefs to simplify the code needed to override LookupStructure
-// and LookupStructureFactory
-typedef LookupStructure<ExactMatchKey>   ExactLookupStructure;
-typedef LookupStructure<LPMMatchKey>     LPMLookupStructure;
-typedef LookupStructure<TernaryMatchKey> TernaryLookupStructure;
-typedef LookupStructure<RangeMatchKey>   RangeLookupStructure;
+// Convenience alias declarations to simplify the code needed to override
+// LookupStructure and LookupStructureFactory
+using ExactLookupStructure = LookupStructure<ExactMatchKey>;
+using LPMLookupStructure = LookupStructure<LPMMatchKey>;
+using TernaryLookupStructure = LookupStructure<TernaryMatchKey>;
+using RangeLookupStructure = LookupStructure<RangeMatchKey>;
 
 //! This class is used by match units to create instances of the appropriate
 //! LookupStructure implementation. In order to use custom data structures in
@@ -158,6 +164,8 @@ typedef LookupStructure<RangeMatchKey>   RangeLookupStructure;
 //! data structure.
 class LookupStructureFactory {
  public:
+  explicit LookupStructureFactory(bool enable_ternary_cache = true);
+
   virtual ~LookupStructureFactory() = default;
 
   //! This is a utility to call the correct `create_for_<type>` function based
@@ -182,6 +190,9 @@ class LookupStructureFactory {
   //! Create a lookup structure for range macthes
   virtual std::unique_ptr<RangeLookupStructure>
   create_for_range(size_t size, size_t nbytes_key);
+
+ private:
+  bool enable_ternary_cache;
 };
 
 

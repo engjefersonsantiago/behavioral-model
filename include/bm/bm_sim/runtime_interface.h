@@ -23,18 +23,20 @@
 
 #include <string>
 #include <vector>
+#include <iosfwd>
 
+#include "action_profile.h"
 #include "match_tables.h"
 
 namespace bm {
 
 class RuntimeInterface {
  public:
-  typedef MatchTableIndirect::mbr_hdl_t mbr_hdl_t;
-  typedef MatchTableIndirectWS::grp_hdl_t grp_hdl_t;
+  using mbr_hdl_t = MatchTableIndirect::mbr_hdl_t;
+  using grp_hdl_t = MatchTableIndirectWS::grp_hdl_t;
 
-  typedef Meter::MeterErrorCode MeterErrorCode;
-  typedef Register::RegisterErrorCode RegisterErrorCode;
+  using MeterErrorCode = Meter::MeterErrorCode;
+  using RegisterErrorCode = Register::RegisterErrorCode;
 
   enum ErrorCode {
     SUCCESS = 0,
@@ -45,6 +47,15 @@ class RuntimeInterface {
 
  public:
   virtual ~RuntimeInterface() { }
+
+  // common to all tables
+
+  virtual MatchErrorCode
+  mt_get_num_entries(size_t cxt_id,
+                     const std::string &table_name,
+                     size_t *num_entries) const = 0;
+
+  // direct tables
 
   virtual MatchErrorCode
   mt_add_entry(size_t cxt_id,
@@ -79,24 +90,66 @@ class RuntimeInterface {
                    entry_handle_t handle,
                    unsigned int ttl_ms) = 0;
 
+  // action profiles
+
   virtual MatchErrorCode
-  mt_indirect_add_member(size_t cxt_id,
-                         const std::string &table_name,
+  mt_act_prof_add_member(size_t cxt_id,
+                         const std::string &act_prof_name,
                          const std::string &action_name,
                          ActionData action_data,
                          mbr_hdl_t *mbr) = 0;
 
   virtual MatchErrorCode
-  mt_indirect_delete_member(size_t cxt_id,
-                            const std::string &table_name,
+  mt_act_prof_delete_member(size_t cxt_id,
+                            const std::string &act_prof_name,
                             mbr_hdl_t mbr) = 0;
 
   virtual MatchErrorCode
-  mt_indirect_modify_member(size_t cxt_id,
-                            const std::string &table_name,
-                            mbr_hdl_t mbr_hdl,
+  mt_act_prof_modify_member(size_t cxt_id,
+                            const std::string &act_prof_name,
+                            mbr_hdl_t mbr,
                             const std::string &action_name,
                             ActionData action_data) = 0;
+
+  virtual MatchErrorCode
+  mt_act_prof_create_group(size_t cxt_id,
+                           const std::string &act_prof_name,
+                           grp_hdl_t *grp) = 0;
+
+  virtual MatchErrorCode
+  mt_act_prof_delete_group(size_t cxt_id,
+                           const std::string &act_prof_name,
+                           grp_hdl_t grp) = 0;
+
+  virtual MatchErrorCode
+  mt_act_prof_add_member_to_group(size_t cxt_id,
+                                  const std::string &act_prof_name,
+                                  mbr_hdl_t mbr, grp_hdl_t grp) = 0;
+
+  virtual MatchErrorCode
+  mt_act_prof_remove_member_from_group(size_t cxt_id,
+                                       const std::string &act_prof_name,
+                                       mbr_hdl_t mbr, grp_hdl_t grp) = 0;
+
+  virtual std::vector<ActionProfile::Member>
+  mt_act_prof_get_members(size_t cxt_id,
+                          const std::string &act_prof_name) const = 0;
+
+  virtual MatchErrorCode
+  mt_act_prof_get_member(size_t cxt_id, const std::string &act_prof_name,
+                         mbr_hdl_t mbr,
+                         ActionProfile::Member *member) const = 0;
+
+  virtual std::vector<ActionProfile::Group>
+  mt_act_prof_get_groups(size_t cxt_id,
+                         const std::string &act_prof_name) const = 0;
+
+  virtual MatchErrorCode
+  mt_act_prof_get_group(size_t cxt_id, const std::string &act_prof_name,
+                        grp_hdl_t grp,
+                        ActionProfile::Group *group) const = 0;
+
+  // indirect tables
 
   virtual MatchErrorCode
   mt_indirect_add_entry(size_t cxt_id,
@@ -127,26 +180,6 @@ class RuntimeInterface {
   mt_indirect_set_default_member(size_t cxt_id,
                                  const std::string &table_name,
                                  mbr_hdl_t mbr) = 0;
-
-  virtual MatchErrorCode
-  mt_indirect_ws_create_group(size_t cxt_id,
-                              const std::string &table_name,
-                              grp_hdl_t *grp) = 0;
-
-  virtual MatchErrorCode
-  mt_indirect_ws_delete_group(size_t cxt_id,
-                              const std::string &table_name,
-                              grp_hdl_t grp) = 0;
-
-  virtual MatchErrorCode
-  mt_indirect_ws_add_member_to_group(size_t cxt_id,
-                                     const std::string &table_name,
-                                     mbr_hdl_t mbr, grp_hdl_t grp) = 0;
-
-  virtual MatchErrorCode
-  mt_indirect_ws_remove_member_from_group(size_t cxt_id,
-                                          const std::string &table_name,
-                                          mbr_hdl_t mbr, grp_hdl_t grp) = 0;
 
   virtual MatchErrorCode
   mt_indirect_ws_add_entry(size_t cxt_id,
@@ -239,23 +272,23 @@ class RuntimeInterface {
       size_t cxt_id, const std::string &table_name,
       MatchTableIndirectWS::Entry *entry) const = 0;
 
-  virtual std::vector<MatchTableIndirect::Member>
-  mt_indirect_get_members(size_t cxt_id,
-                          const std::string &table_name) const = 0;
+  virtual MatchErrorCode
+  mt_get_entry_from_key(size_t cxt_id, const std::string &table_name,
+                        const std::vector<MatchKeyParam> &match_key,
+                        MatchTable::Entry *entry, int priority = 1) const = 0;
 
   virtual MatchErrorCode
-  mt_indirect_get_member(size_t cxt_id, const std::string &table_name,
-                         mbr_hdl_t mbr,
-                         MatchTableIndirect::Member *member) const = 0;
-
-  virtual std::vector<MatchTableIndirectWS::Group>
-  mt_indirect_ws_get_groups(size_t cxt_id,
-                            const std::string &table_name) const = 0;
+  mt_indirect_get_entry_from_key(size_t cxt_id, const std::string &table_name,
+                                 const std::vector<MatchKeyParam> &match_key,
+                                 MatchTableIndirect::Entry *entry,
+                                 int priority = 1) const = 0;
 
   virtual MatchErrorCode
-  mt_indirect_ws_get_group(size_t cxt_id, const std::string &table_name,
-                           grp_hdl_t grp,
-                           MatchTableIndirectWS::Group *group) const = 0;
+  mt_indirect_ws_get_entry_from_key(size_t cxt_id,
+                                    const std::string &table_name,
+                                    const std::vector<MatchKeyParam> &match_key,
+                                    MatchTableIndirectWS::Entry *entry,
+                                    int priority = 1) const = 0;
 
   virtual Counter::CounterErrorCode
   read_counters(size_t cxt_id,

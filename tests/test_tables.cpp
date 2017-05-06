@@ -20,12 +20,16 @@
 
 #include <gtest/gtest.h>
 
+#include <bm/bm_sim/tables.h>
+
 #include <memory>
 #include <random>
 #include <thread>
 #include <future>
 #include <limits>
-#include <bm/bm_sim/tables.h>
+#include <string>
+#include <vector>
+#include <set>
 
 using namespace bm;
 
@@ -36,12 +40,12 @@ using std::to_string;
 
 using std::chrono::milliseconds;
 using std::this_thread::sleep_until;
+using std::this_thread::sleep_for;
 
-typedef MatchTableAbstract::ActionEntry ActionEntry;
-typedef MatchUnitExact<ActionEntry> MUExact;
-typedef MatchUnitLPM<ActionEntry> MULPM;
-typedef MatchUnitTernary<ActionEntry> MUTernary;
-typedef MatchUnitRange<ActionEntry> MURange;
+using MUExact = MatchUnitExact<ActionEntry>;
+using MULPM = MatchUnitLPM<ActionEntry>;
+using MUTernary = MatchUnitTernary<ActionEntry>;
+using MURange = MatchUnitRange<ActionEntry>;
 
 namespace {
 
@@ -50,15 +54,14 @@ struct DummyNode: public ControlFlowNode {
   DummyNode()
       : ControlFlowNode("", 0) { }
 
-  const ControlFlowNode *operator()(Packet *pkt) const {
+  const ControlFlowNode *operator()(Packet * pkt) const {
+    (void)pkt;
     return nullptr;
   }
 };
 
 template <typename MUType>
-struct match_type_test {
-
-};
+struct match_type_test { };
 template <>
 struct match_type_test<MUExact> {
   static constexpr MatchKeyParam::Type type = MatchKeyParam::Type::EXACT;
@@ -84,6 +87,7 @@ template <typename MUType>
 class TableSizeTwo : public ::testing::Test {
  protected:
   static constexpr size_t t_size = 2u;
+  static constexpr int default_priority = 7;
 
   PHVFactory phv_factory;
 
@@ -95,14 +99,17 @@ class TableSizeTwo : public ::testing::Test {
 
   HeaderType testHeaderType;
   header_id_t testHeader1{0}, testHeader2{1};
-  ActionFn action_fn;
+  p4object_id_t action_id{0}, action_id_1{1};
+  ActionFn action_fn, action_fn_1;
 
   std::unique_ptr<PHVSourceIface> phv_source{nullptr};
 
   DummyNode node_miss_default{};
 
   TableSizeTwo()
-      : testHeaderType("test_t", 0), action_fn("actionA", 0),
+      : testHeaderType("test_t", 0),
+        action_fn("action", action_id, 0  /* no param */),
+        action_fn_1("action_1", action_id_1, 1  /* 1 param */),
         phv_source(PHVSourceIface::make_phv_source()) {
     testHeaderType.push_back_field("f16", 16);
     testHeaderType.push_back_field("f48", 48);
@@ -122,25 +129,32 @@ class TableSizeTwo : public ::testing::Test {
     match_unit = std::unique_ptr<MUType>(
         new MUType(t_size, key_builder, &lookup_factory));
     table = std::unique_ptr<MatchTable>(
-      new MatchTable("test_table", 0, std::move(match_unit), true)
-    );
-    table->set_next_node(0, nullptr);
+      new MatchTable("test_table", 0, std::move(match_unit), true));
+    table->set_next_node(action_id, nullptr);
+    table->set_next_node(action_id_1, nullptr);
     table->set_next_node_miss_default(&node_miss_default);
 
     match_unit = std::unique_ptr<MUType>(
         new MUType(t_size, key_builder_w_valid, &lookup_factory));
     table_w_valid = std::unique_ptr<MatchTable>(
         new MatchTable("test_table", 0, std::move(match_unit)));
-    table_w_valid->set_next_node(0, nullptr);
+    table_w_valid->set_next_node(action_id, nullptr);
+    table_w_valid->set_next_node(action_id_1, nullptr);
     table_w_valid->set_next_node_miss_default(&node_miss_default);
   }
 
+  std::vector<MatchKeyParam> make_match_key(const std::string &key);
+
   MatchErrorCode add_entry(const std::string &key,
-			   entry_handle_t *handle);
+                           entry_handle_t *handle) {
+    auto match_key = make_match_key(key);
+    return table->add_entry(match_key, &action_fn, ActionData(), handle,
+                            default_priority);
+  }
 
   MatchErrorCode add_entry_w_valid(const std::string &key,
-				   bool valid,
-				   entry_handle_t *handle);
+                                   bool valid,
+                                   entry_handle_t *handle);
 
   Packet get_pkt(int length) {
     // dummy packet, won't be parsed
@@ -160,59 +174,49 @@ class TableSizeTwo : public ::testing::Test {
   // virtual void TearDown() { }
 };
 
-template<>
-MatchErrorCode
-TableSizeTwo<MUExact>::add_entry(const std::string &key,
-				 entry_handle_t *handle) {
-  ActionData action_data;
+template <>
+std::vector<MatchKeyParam>
+TableSizeTwo<MUExact>::make_match_key(const std::string &key) {
   std::vector<MatchKeyParam> match_key;
   match_key.emplace_back(MatchKeyParam::Type::EXACT, key);
-  return table->add_entry(match_key, &action_fn, action_data, handle);
+  return match_key;
 }
 
 template<>
-MatchErrorCode
-TableSizeTwo<MULPM>::add_entry(const std::string &key,
-			       entry_handle_t *handle) {
-  ActionData action_data;
+std::vector<MatchKeyParam>
+TableSizeTwo<MULPM>::make_match_key(const std::string &key) {
   std::vector<MatchKeyParam> match_key;
   int prefix_length = 16;
   match_key.emplace_back(MatchKeyParam::Type::LPM, key, prefix_length);
-  return table->add_entry(match_key, &action_fn, action_data, handle);
+  return match_key;
 }
 
 template<>
-MatchErrorCode
-TableSizeTwo<MUTernary>::add_entry(const std::string &key,
-				   entry_handle_t *handle) {
-  ActionData action_data;
+std::vector<MatchKeyParam>
+TableSizeTwo<MUTernary>::make_match_key(const std::string &key) {
   std::vector<MatchKeyParam> match_key;
   std::string mask = "\xff\xff";
-  int priority = 1;
   match_key.emplace_back(MatchKeyParam::Type::TERNARY, key, std::move(mask));
-  return table->add_entry(match_key, &action_fn, action_data, handle, priority);
+  return match_key;
 }
 
 template<>
-MatchErrorCode
-TableSizeTwo<MURange>::add_entry(const std::string &key,
-                                 entry_handle_t *handle) {
-  ActionData action_data;
+std::vector<MatchKeyParam>
+TableSizeTwo<MURange>::make_match_key(const std::string &key) {
   std::vector<MatchKeyParam> match_key;
   Data start(key.data(), key.size());
   Data end;
   // we create a range with 5 values
   end.add(start, Data(4));
-  int priority = 1;
   match_key.emplace_back(MatchKeyParam::Type::RANGE, key, end.get_string());
-  return table->add_entry(match_key, &action_fn, action_data, handle, priority);
+  return match_key;
 }
 
 template<>
 MatchErrorCode
 TableSizeTwo<MUExact>::add_entry_w_valid(const std::string &key,
-					 bool valid,
-					 entry_handle_t *handle) {
+                                         bool valid,
+                                         entry_handle_t *handle) {
   ActionData action_data;
   std::vector<MatchKeyParam> match_key;
   match_key.emplace_back(MatchKeyParam::Type::EXACT, key);
@@ -224,8 +228,8 @@ TableSizeTwo<MUExact>::add_entry_w_valid(const std::string &key,
 template<>
 MatchErrorCode
 TableSizeTwo<MULPM>::add_entry_w_valid(const std::string &key,
-				       bool valid,
-				       entry_handle_t *handle) {
+                                       bool valid,
+                                       entry_handle_t *handle) {
   ActionData action_data;
   std::vector<MatchKeyParam> match_key;
   int prefix_length = 16;
@@ -237,8 +241,8 @@ TableSizeTwo<MULPM>::add_entry_w_valid(const std::string &key,
 template<>
 MatchErrorCode
 TableSizeTwo<MUTernary>::add_entry_w_valid(const std::string &key,
-					   bool valid,
-					   entry_handle_t *handle) {
+                                           bool valid,
+                                           entry_handle_t *handle) {
   ActionData action_data;
   std::vector<MatchKeyParam> match_key;
   std::string mask = "\xff\xff";
@@ -246,14 +250,14 @@ TableSizeTwo<MUTernary>::add_entry_w_valid(const std::string &key,
   match_key.emplace_back(MatchKeyParam::Type::TERNARY, key, std::move(mask));
   match_key.emplace_back(MatchKeyParam::Type::VALID, valid ? "\x01" : "\x00");
   return table_w_valid->add_entry(match_key, &action_fn, action_data,
-				  handle, priority);
+                                  handle, priority);
 }
 
 template<>
 MatchErrorCode
 TableSizeTwo<MURange>::add_entry_w_valid(const std::string &key,
-					   bool valid,
-					   entry_handle_t *handle) {
+                                           bool valid,
+                                           entry_handle_t *handle) {
   ActionData action_data;
   std::vector<MatchKeyParam> match_key;
   Data start(key.data(), key.size());
@@ -264,13 +268,13 @@ TableSizeTwo<MURange>::add_entry_w_valid(const std::string &key,
   match_key.emplace_back(MatchKeyParam::Type::RANGE, key, end.get_string());
   match_key.emplace_back(MatchKeyParam::Type::VALID, valid ? "\x01" : "\x00");
   return table_w_valid->add_entry(match_key, &action_fn, action_data,
-				  handle, priority);
+                                  handle, priority);
 }
 
-typedef Types<MUExact,
-	      MULPM,
-	      MUTernary,
-              MURange> TableTypes;
+using TableTypes = Types<MUExact,
+                         MULPM,
+                         MUTernary,
+                         MURange>;
 
 TYPED_TEST_CASE(TableSizeTwo, TableTypes);
 
@@ -384,12 +388,38 @@ TYPED_TEST(TableSizeTwo, LookupEntry) {
   ASSERT_FALSE(hit);
 }
 
+TYPED_TEST(TableSizeTwo, PacketEntryIndex) {
+  std::string key = "\x0a\xba";
+  entry_handle_t handle;
+  MatchErrorCode rc;
+
+  Packet pkt = this->get_pkt(64);
+  Field &f = pkt.get_phv()->get_field(this->testHeader1, 0);
+
+  rc = this->add_entry(key, &handle);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+
+  const auto handle_index_mask = static_cast<entry_handle_t>(0x00ffffff);
+
+  ASSERT_EQ(Packet::INVALID_ENTRY_INDEX, pkt.get_entry_index());
+
+  // table hit
+  f.set("0xaba");
+  ASSERT_EQ(nullptr, this->table->apply_action(&pkt));
+  ASSERT_EQ(handle_index_mask & handle, pkt.get_entry_index());
+
+  rc = this->table->delete_entry(handle);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+
+  // table miss
+  ASSERT_EQ(&this->node_miss_default, this->table->apply_action(&pkt));
+  ASSERT_EQ(Packet::INVALID_ENTRY_INDEX, pkt.get_entry_index());
+}
+
 TYPED_TEST(TableSizeTwo, NextNodeHitMiss) {
   std::string key = "\x0a\xba";
   entry_handle_t handle;
   MatchErrorCode rc;
-  entry_handle_t lookup_handle;
-  bool hit;
 
   Packet pkt = this->get_pkt(64);
   Field &f = pkt.get_phv()->get_field(this->testHeader1, 0);
@@ -438,10 +468,7 @@ TYPED_TEST(TableSizeTwo, NextNodeHitMiss) {
 
 TYPED_TEST(TableSizeTwo, SetDefaultAction) {
   std::string key = "\x0a\xba";
-  entry_handle_t handle;
   MatchErrorCode rc;
-  entry_handle_t lookup_handle;
-  bool hit;
 
   Packet pkt = this->get_pkt(64);
   Field &f = pkt.get_phv()->get_field(this->testHeader1, 0);
@@ -467,16 +494,13 @@ TYPED_TEST(TableSizeTwo, SetDefaultAction) {
 
 TYPED_TEST(TableSizeTwo, ConstDefaultActionFn) {
   std::string key = "\x0a\xba";
-  entry_handle_t handle;
   MatchErrorCode rc;
-  entry_handle_t lookup_handle;
-  bool hit;
 
   Packet pkt = this->get_pkt(64);
   Field &f = pkt.get_phv()->get_field(this->testHeader1, 0);
   f.set("0xaba");
 
-  ActionFn bad_action_fn("bad_action", 1);
+  ActionFn bad_action_fn("bad_action", 1, 0);
   this->table->set_next_node(1, nullptr);
 
   this->table->set_const_default_action_fn(&this->action_fn);
@@ -498,15 +522,12 @@ TYPED_TEST(TableSizeTwo, ConstDefaultActionFn) {
 
 TYPED_TEST(TableSizeTwo, ConstDefaultEntry) {
   std::string key = "\x0a\xba";
-  entry_handle_t handle;
-  entry_handle_t lookup_handle;
-  bool hit;
 
   Packet pkt = this->get_pkt(64);
   Field &f = pkt.get_phv()->get_field(this->testHeader1, 0);
   f.set("0xaba");
 
-  ActionFn bad_action_fn("bad_action", 1);
+  ActionFn bad_action_fn("bad_action", 1, 0);
   this->table->set_next_node(1, nullptr);
 
   auto change_default_entry = [this, &bad_action_fn](
@@ -568,8 +589,9 @@ TYPED_TEST(TableSizeTwo, ModifyEntry) {
   // we modify the entry, this time using some action data
   ActionData new_action_data;
   new_action_data.push_back_action_data(0xaba);
-  this->table->modify_entry(handle, &(this->action_fn),
-			    std::move(new_action_data));
+  rc = this->table->modify_entry(handle, &this->action_fn_1,
+                                 std::move(new_action_data));
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
   const ActionEntry &entry_2 = this->table->lookup(pkt, &hit, &lookup_handle);
   ASSERT_TRUE(hit);
@@ -580,7 +602,6 @@ TYPED_TEST(TableSizeTwo, ModifyEntry) {
 
 TYPED_TEST(TableSizeTwo, Counters) {
   std::string key_ = "\x0a\xba";
-  ByteContainer key("0x0aba");
   entry_handle_t handle;
   entry_handle_t bad_handle = 999u;
   MatchErrorCode rc;
@@ -589,10 +610,10 @@ TYPED_TEST(TableSizeTwo, Counters) {
   ASSERT_EQ(rc, MatchErrorCode::SUCCESS);
   ASSERT_EQ(1u, this->table->get_num_entries());
 
-  uint64_t counter_bytes = 0;
-  uint64_t counter_packets = 0;
+  uint64_t counter_bytes = 0, counter_packets = 0;
 
-  rc = this->table->query_counters(bad_handle, &counter_bytes, &counter_packets);
+  rc = this->table->query_counters(bad_handle, &counter_bytes,
+                                   &counter_packets);
   ASSERT_EQ(rc, MatchErrorCode::INVALID_HANDLE);
 
   rc = this->table->query_counters(handle, &counter_bytes, &counter_packets);
@@ -622,8 +643,53 @@ TYPED_TEST(TableSizeTwo, Counters) {
   ASSERT_EQ(1u, counter_packets);
 }
 
+TYPED_TEST(TableSizeTwo, CountersReset) {
+  std::string key1("\x0a\xba"), key2("\x0a\xbb"), key3("\x0a\xbc");
+  entry_handle_t h1, h2, h3;
+  MatchErrorCode rc;
+
+  rc = this->add_entry(key1, &h1);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+  rc = this->add_entry(key2, &h2);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+  rc = this->add_entry(key3, &h3);
+  ASSERT_NE(MatchErrorCode::SUCCESS, rc);  // table full
+
+  uint64_t counter_bytes = 0, counter_packets = 0;
+
+  auto send_pkt_and_increment = [this, &key1]() {
+    Packet pkt = this->get_pkt(64);
+    Field &f = pkt.get_phv()->get_field(this->testHeader1, 0);
+    f.set(key1.data(), key1.size());
+    this->table->apply_action(&pkt);
+  };
+
+  auto query_counter = [this, &h1, &counter_bytes, &counter_packets]() {
+    auto code = this->table->query_counters(h1, &counter_bytes,
+                                            &counter_packets);
+    ASSERT_EQ(code, MatchErrorCode::SUCCESS);
+  };
+
+  query_counter();
+  ASSERT_EQ(0u, counter_packets);
+  send_pkt_and_increment();
+  query_counter();
+  ASSERT_EQ(1u, counter_packets);
+
+  // now delete the entry
+  rc = this->table->delete_entry(h1);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+  // add the entry back and check that the counters have been reset (the entry
+  // occupies the same "slot" in the table)
+  rc = this->add_entry(key1, &h1);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+  query_counter();
+  ASSERT_EQ(0u, counter_packets);
+  ASSERT_EQ(0u, counter_bytes);
+}
+
 TYPED_TEST(TableSizeTwo, Meters) {
-  typedef std::chrono::high_resolution_clock clock;
+  using clock = std::chrono::high_resolution_clock;
 
   std::string key_ = "\x0a\xba";
   ByteContainer key("0x0aba");
@@ -778,6 +844,57 @@ TYPED_TEST(TableSizeTwo, HandleIterator) {
   ASSERT_EQ(this->table->handles_end(), ++it);
 }
 
+TYPED_TEST(TableSizeTwo, GetEntryFromKey) {
+  std::string key_1 = "\xaa\xaa";
+  std::string key_2 = "\xbb\xbb";
+  entry_handle_t handle_1, handle_2;
+  MatchErrorCode rc;
+
+  MatchTable::Entry entry;
+  auto match_key_1 = this->make_match_key(key_1);
+  auto match_key_2 = this->make_match_key(key_2);
+
+  rc = this->table->get_entry_from_key(match_key_1, &entry,
+                                       this->default_priority);
+  ASSERT_EQ(MatchErrorCode::BAD_MATCH_KEY, rc);
+
+  rc = this->add_entry(key_1, &handle_1);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+
+  rc = this->table->get_entry_from_key(match_key_1, &entry,
+                                       this->default_priority);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+  ASSERT_EQ(handle_1, entry.handle);
+
+  rc = this->add_entry(key_2, &handle_2);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+
+  rc = this->table->get_entry_from_key(match_key_1, &entry,
+                                       this->default_priority);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+  ASSERT_EQ(handle_1, entry.handle);
+
+  rc = this->table->get_entry_from_key(match_key_2, &entry,
+                                       this->default_priority);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+  ASSERT_EQ(handle_2, entry.handle);
+
+  // we delete the first entry, then add it again, then retrieve the entry
+  // this was added because an earlier implementation would return the correct
+  // internal handle with an incorrect version number (so entry.handle was
+  // incorrect)
+  rc = this->table->delete_entry(handle_1);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+
+  rc = this->add_entry(key_1, &handle_1);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+
+  rc = this->table->get_entry_from_key(match_key_1, &entry,
+                                       this->default_priority);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+  ASSERT_EQ(handle_1, entry.handle);
+}
+
 TYPED_TEST(TableSizeTwo, GetEntries) {
   MatchErrorCode rc;
   std::vector<entry_handle_t> handles;
@@ -801,18 +918,45 @@ TYPED_TEST(TableSizeTwo, GetEntries) {
     ASSERT_EQ(keys[i], e.match_key[0].key);
     ASSERT_EQ(&this->action_fn, e.action_fn);
     ASSERT_EQ(0u, e.action_data.size());
+    ASSERT_EQ(0u, e.timeout_ms);
+    ASSERT_EQ(0u, e.time_since_hit_ms);
   }
+}
+
+TYPED_TEST(TableSizeTwo, ImmutableEntries) {
+  MatchErrorCode rc;
+  entry_handle_t handle_1, handle_2;
+  std::string key_1("\xaa\xaa");
+  std::string key_2("\xbb\xbb");
+
+  rc = this->add_entry(key_1, &handle_1);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+
+  this->table->set_immutable_entries();
+
+  rc = this->add_entry(key_2, &handle_2);
+  ASSERT_EQ(MatchErrorCode::IMMUTABLE_TABLE_ENTRIES, rc);
+
+  ActionData new_action_data;
+  new_action_data.push_back_action_data(0xaba);
+  rc = this->table->modify_entry(handle_1, &(this->action_fn),
+                                 std::move(new_action_data));
+  ASSERT_EQ(MatchErrorCode::IMMUTABLE_TABLE_ENTRIES, rc);
+
+  rc = this->table->delete_entry(handle_1);
+  ASSERT_EQ(MatchErrorCode::IMMUTABLE_TABLE_ENTRIES, rc);
 }
 
 
 class TableIndirect : public ::testing::Test {
  protected:
-  typedef MatchTableIndirect::mbr_hdl_t mbr_hdl_t;
+  using mbr_hdl_t = MatchTableIndirect::mbr_hdl_t;
 
  protected:
   PHVFactory phv_factory;
 
   MatchKeyBuilder key_builder;
+  ActionProfile action_profile;
   std::unique_ptr<MatchTableIndirect> table;
 
   HeaderType testHeaderType;
@@ -826,7 +970,8 @@ class TableIndirect : public ::testing::Test {
   static const size_t table_size = 128;
 
   TableIndirect()
-      : testHeaderType("test_t", 0), action_fn("actionA", 0),
+      : action_profile("test_act_prof", 0, false),
+        testHeaderType("test_t", 0), action_fn("actionA", 0, 1  /* 1 param */),
         phv_source(PHVSourceIface::make_phv_source()) {
     testHeaderType.push_back_field("f16", 16);
     testHeaderType.push_back_field("f48", 48);
@@ -842,11 +987,12 @@ class TableIndirect : public ::testing::Test {
                                        true, false);
     table->set_next_node(0, nullptr);
     table->set_next_node_miss_default(&node_miss_default);
+    table->set_action_profile(&action_profile);
   }
 
   MatchErrorCode add_entry(const std::string &key,
-			   mbr_hdl_t mbr,
-			   entry_handle_t *handle) {
+                           mbr_hdl_t mbr,
+                           entry_handle_t *handle) {
     std::vector<MatchKeyParam> match_key;
     match_key.emplace_back(MatchKeyParam::Type::EXACT, key);
     return table->add_entry(match_key, mbr, handle);
@@ -855,13 +1001,14 @@ class TableIndirect : public ::testing::Test {
   MatchErrorCode add_member(unsigned int data, mbr_hdl_t *mbr) {
     ActionData action_data;
     action_data.push_back_action_data(data);
-    return table->add_member(&action_fn, std::move(action_data), mbr);
+    return action_profile.add_member(&action_fn, std::move(action_data), mbr);
   }
 
   MatchErrorCode modify_member(mbr_hdl_t mbr, unsigned int data) {
     ActionData action_data;
     action_data.push_back_action_data(data);
-    return table->modify_member(mbr, &action_fn, std::move(action_data));
+    return action_profile.modify_member(mbr, &action_fn,
+                                        std::move(action_data));
   }
 
   Packet get_pkt(int length) {
@@ -887,12 +1034,12 @@ TEST_F(TableIndirect, AddMember) {
   mbr_hdl_t mbr;
   size_t num_mbrs = 128;
 
-  for(unsigned int i = 0; i < num_mbrs; i++) {
+  for (unsigned int i = 0; i < num_mbrs; i++) {
     rc = add_member(i, &mbr);
     ASSERT_EQ(rc, MatchErrorCode::SUCCESS);
     // this is implementation specific, is it a good idea ?
     ASSERT_EQ(i, mbr);
-    ASSERT_EQ(i + 1, table->get_num_members());
+    ASSERT_EQ(i + 1, action_profile.get_num_members());
   }
 }
 
@@ -913,8 +1060,8 @@ TEST_F(TableIndirect, AddEntry) {
 
   static_assert(table_size < 255, "");
 
-  for(unsigned int i = 0; i < table_size; i++) {
-    key = std::string(2, (char) i);
+  for (unsigned int i = 0; i < table_size; i++) {
+    key = std::string(2, static_cast<char>(i));
     rc = add_entry(key, mbr_1, &handle);
     ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
     rc = add_entry(key, mbr_1, &handle);
@@ -938,28 +1085,28 @@ TEST_F(TableIndirect, DeleteMember) {
   ASSERT_EQ(rc, MatchErrorCode::SUCCESS);
   // this is implementation specific, is it a good idea ?
   ASSERT_EQ(0u, mbr);
-  ASSERT_EQ(1u, table->get_num_members());
+  ASSERT_EQ(1u, action_profile.get_num_members());
 
-  rc = table->delete_member(mbr);
+  rc = action_profile.delete_member(mbr);
   ASSERT_EQ(rc, MatchErrorCode::SUCCESS);
-  ASSERT_EQ(0u, table->get_num_members());
+  ASSERT_EQ(0u, action_profile.get_num_members());
 
   rc = add_member(0xabb, &mbr);
   ASSERT_EQ(rc, MatchErrorCode::SUCCESS);
   // this is implementation specific, is it a good idea ?
   ASSERT_EQ(0u, mbr);
-  ASSERT_EQ(1u, table->get_num_members());
+  ASSERT_EQ(1u, action_profile.get_num_members());
 
   rc = add_entry(key, mbr, &handle);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
-  rc = table->delete_member(mbr);
+  rc = action_profile.delete_member(mbr);
   ASSERT_EQ(rc, MatchErrorCode::MBR_STILL_USED);
 
   rc = table->delete_entry(handle);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
-  rc = table->delete_member(mbr);
+  rc = action_profile.delete_member(mbr);
   ASSERT_EQ(rc, MatchErrorCode::SUCCESS);
 }
 
@@ -1030,7 +1177,6 @@ TEST_F(TableIndirect, NextNodeHitMiss) {
   unsigned int data = 666u;
   mbr_hdl_t mbr;
   entry_handle_t handle;
-  bool hit;
 
   Packet pkt = get_pkt(64);
   Field &f = pkt.get_phv()->get_field(testHeader1, 0);
@@ -1048,7 +1194,7 @@ TEST_F(TableIndirect, NextNodeHitMiss) {
     MatchErrorCode rc;
     rc = table->delete_entry(handle);
     ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
-    rc = table->delete_member(mbr);
+    rc = action_profile.delete_member(mbr);
     ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
   };
 
@@ -1141,9 +1287,10 @@ TEST_F(TableIndirect, ResetState) {
   ASSERT_TRUE(hit);
 
   table->reset_state();
+  action_profile.reset_state();
   rc = table->delete_entry(handle);
   ASSERT_EQ(MatchErrorCode::INVALID_HANDLE, rc);
-  rc = table->delete_member(mbr);
+  rc = action_profile.delete_member(mbr);
   ASSERT_EQ(MatchErrorCode::INVALID_MBR_HANDLE, rc);
 
   rc = add_member(data, &mbr);
@@ -1178,7 +1325,7 @@ TEST_F(TableIndirect, GetEntries) {
   }
 
   const auto entries = table->get_entries();
-  const auto members = table->get_members();
+  const auto members = action_profile.get_members();
 
   ASSERT_EQ(num_entries, entries.size());
   ASSERT_EQ(num_mbrs, members.size());
@@ -1189,6 +1336,8 @@ TEST_F(TableIndirect, GetEntries) {
     ASSERT_EQ(keys[i], e.match_key[0].key);
     ASSERT_EQ(mbrs[i % num_mbrs], e.mbr);
     ASSERT_EQ(-1, e.priority);
+    ASSERT_EQ(0u, e.timeout_ms);
+    ASSERT_EQ(0u, e.time_since_hit_ms);
   }
 
   for (size_t i = 0; i < num_mbrs; i++) {
@@ -1203,13 +1352,14 @@ TEST_F(TableIndirect, GetEntries) {
 
 class TableIndirectWS : public ::testing::Test {
  protected:
-  typedef MatchTableIndirect::mbr_hdl_t mbr_hdl_t;
-  typedef MatchTableIndirectWS::grp_hdl_t grp_hdl_t;
+  using mbr_hdl_t = MatchTableIndirect::mbr_hdl_t;
+  using grp_hdl_t = MatchTableIndirectWS::grp_hdl_t;
 
  protected:
   PHVFactory phv_factory;
 
   MatchKeyBuilder key_builder;
+  ActionProfile action_profile;
   std::unique_ptr<MatchTableIndirectWS> table;
 
   HeaderType testHeaderType;
@@ -1225,7 +1375,8 @@ class TableIndirectWS : public ::testing::Test {
   static const size_t table_size = 128;
 
   TableIndirectWS()
-      : testHeaderType("test_t", 0), action_fn("actionA", 0),
+      : action_profile("test_act_prof", 0, true),
+        testHeaderType("test_t", 0), action_fn("actionA", 0, 1  /* 1 param */),
         phv_source(PHVSourceIface::make_phv_source()) {
     testHeaderType.push_back_field("f16", 16);
     testHeaderType.push_back_field("f48", 48);
@@ -1240,29 +1391,30 @@ class TableIndirectWS : public ::testing::Test {
                                          &lookup_factory,
                                          true, false);
     table->set_next_node(0, nullptr);
+    table->set_action_profile(&action_profile);
 
     BufBuilder builder;
 
-    builder.push_back_field(testHeader1, 1); // h1.f48
-    builder.push_back_field(testHeader2, 0); // h2.f16
-    builder.push_back_field(testHeader2, 1); // h2.f48
+    builder.push_back_field(testHeader1, 1);  // h1.f48
+    builder.push_back_field(testHeader2, 0);  // h2.f16
+    builder.push_back_field(testHeader2, 1);  // h2.f48
 
     std::unique_ptr<Calculation> calc(new Calculation(builder, "xxh64"));
 
-    table->set_hash(std::move(calc));
+    action_profile.set_hash(std::move(calc));
   }
 
   MatchErrorCode add_entry(const std::string &key,
-  			   mbr_hdl_t mbr,
-  			   entry_handle_t *handle) {
+                           mbr_hdl_t mbr,
+                           entry_handle_t *handle) {
     std::vector<MatchKeyParam> match_key;
     match_key.emplace_back(MatchKeyParam::Type::EXACT, key);
     return table->add_entry(match_key, mbr, handle);
   }
 
   MatchErrorCode add_entry_ws(const std::string &key,
-			      grp_hdl_t grp,
-			      entry_handle_t *handle) {
+                              grp_hdl_t grp,
+                              entry_handle_t *handle) {
     std::vector<MatchKeyParam> match_key;
     match_key.emplace_back(MatchKeyParam::Type::EXACT, key);
     return table->add_entry_ws(match_key, grp, handle);
@@ -1271,7 +1423,7 @@ class TableIndirectWS : public ::testing::Test {
   MatchErrorCode add_member(unsigned int data, mbr_hdl_t *mbr) {
     ActionData action_data;
     action_data.push_back_action_data(data);
-    return table->add_member(&action_fn, std::move(action_data), mbr);
+    return action_profile.add_member(&action_fn, std::move(action_data), mbr);
   }
 
   Packet get_pkt(int length) {
@@ -1301,61 +1453,61 @@ TEST_F(TableIndirectWS, Group) {
   size_t num_mbrs;
   unsigned int data = 666u;
 
-  ASSERT_EQ(0u, table->get_num_groups());
+  ASSERT_EQ(0u, action_profile.get_num_groups());
 
-  rc = table->create_group(&grp);
+  rc = action_profile.create_group(&grp);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
-  ASSERT_EQ(1u, table->get_num_groups());
+  ASSERT_EQ(1u, action_profile.get_num_groups());
 
-  rc = table->get_num_members_in_group(grp, &num_mbrs);
+  rc = action_profile.get_num_members_in_group(grp, &num_mbrs);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
   ASSERT_EQ(0u, num_mbrs);
 
   rc = add_member(data, &mbr_1);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
-  rc = table->add_member_to_group(mbr_1, grp_bad);
+  rc = action_profile.add_member_to_group(mbr_1, grp_bad);
   ASSERT_EQ(MatchErrorCode::INVALID_GRP_HANDLE, rc);
 
-  rc = table->add_member_to_group(mbr_1, grp);
+  rc = action_profile.add_member_to_group(mbr_1, grp);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
-  rc = table->add_member_to_group(mbr_bad, grp);
+  rc = action_profile.add_member_to_group(mbr_bad, grp);
   ASSERT_EQ(MatchErrorCode::INVALID_MBR_HANDLE, rc);
 
-  rc = table->get_num_members_in_group(grp, &num_mbrs);
+  rc = action_profile.get_num_members_in_group(grp, &num_mbrs);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
   ASSERT_EQ(1u, num_mbrs);
 
-  rc = table->add_member_to_group(mbr_1, grp);
+  rc = action_profile.add_member_to_group(mbr_1, grp);
   ASSERT_EQ(MatchErrorCode::MBR_ALREADY_IN_GRP, rc);
 
-  rc = table->get_num_members_in_group(grp, &num_mbrs);
+  rc = action_profile.get_num_members_in_group(grp, &num_mbrs);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
   ASSERT_EQ(1u, num_mbrs);
 
-  rc = table->delete_member(mbr_1);
+  rc = action_profile.delete_member(mbr_1);
   ASSERT_EQ(MatchErrorCode::MBR_STILL_USED, rc);
 
-  rc = table->remove_member_from_group(mbr_1, grp);
+  rc = action_profile.remove_member_from_group(mbr_1, grp);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
-  rc = table->get_num_members_in_group(grp, &num_mbrs);
+  rc = action_profile.get_num_members_in_group(grp, &num_mbrs);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
   ASSERT_EQ(0u, num_mbrs);
 
-  rc = table->remove_member_from_group(mbr_1, grp);
+  rc = action_profile.remove_member_from_group(mbr_1, grp);
   ASSERT_EQ(MatchErrorCode::MBR_NOT_IN_GRP, rc);
 
-  rc = table->delete_member(mbr_1);
+  rc = action_profile.delete_member(mbr_1);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
-  rc = table->delete_group(grp);
+  rc = action_profile.delete_group(grp);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
-  ASSERT_EQ(0u, table->get_num_groups());
+  ASSERT_EQ(0u, action_profile.get_num_groups());
 
-  rc = table->delete_group(grp);
+  rc = action_profile.delete_group(grp);
   ASSERT_EQ(MatchErrorCode::INVALID_GRP_HANDLE, rc);
 }
 
@@ -1363,13 +1515,11 @@ TEST_F(TableIndirectWS, EntryWS) {
   MatchErrorCode rc;
   grp_hdl_t grp;
   mbr_hdl_t mbr_1;
-  mbr_hdl_t mbr_bad = 999u;
-  mbr_hdl_t grp_bad = 999u;
   entry_handle_t handle;
   std::string key = "\x0a\xba";
   unsigned int data = 666u;
 
-  rc = table->create_group(&grp);
+  rc = action_profile.create_group(&grp);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
   rc = add_entry_ws(key, grp, &handle);
@@ -1378,19 +1528,19 @@ TEST_F(TableIndirectWS, EntryWS) {
   rc = add_member(data, &mbr_1);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
-  rc = table->add_member_to_group(mbr_1, grp);
+  rc = action_profile.add_member_to_group(mbr_1, grp);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
   rc = add_entry_ws(key, grp, &handle);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
-  rc = table->delete_group(grp);
+  rc = action_profile.delete_group(grp);
   ASSERT_EQ(MatchErrorCode::GRP_STILL_USED, rc);
 
   rc = table->delete_entry(handle);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
-  rc = table->delete_group(grp);
+  rc = action_profile.delete_group(grp);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 }
 
@@ -1405,12 +1555,12 @@ TEST_F(TableIndirectWS, LookupEntryWS) {
   unsigned int data_1 = 666u;
   unsigned int data_2 = 777u;
 
-  rc = table->create_group(&grp);
+  rc = action_profile.create_group(&grp);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
   rc = add_member(data_1, &mbr_1);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
-  rc = table->add_member_to_group(mbr_1, grp);
+  rc = action_profile.add_member_to_group(mbr_1, grp);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
   rc = add_entry_ws(key, grp, &handle);
@@ -1425,7 +1575,7 @@ TEST_F(TableIndirectWS, LookupEntryWS) {
   h1_f16.set("0xaba");
 
   // do a few lookups, should always resolve to mbr_1
-  for(int i = 0; i < 16; i++) {
+  for (int i = 0; i < 16; i++) {
     h1_f48.set(dis(gen));
     h2_f16.set(dis(gen));
     h2_f48.set(dis(gen));
@@ -1437,22 +1587,25 @@ TEST_F(TableIndirectWS, LookupEntryWS) {
   // add a second member
   rc = add_member(data_2, &mbr_2);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
-  rc = table->add_member_to_group(mbr_2, grp);
+  rc = action_profile.add_member_to_group(mbr_2, grp);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
   // do a few lookups, should resolve to 1 or 2 with equal probability
   size_t hits_1 = 0;
   size_t hits_2 = 0;
-  for(int i = 0; i < 2000; i++) {
+  for (int i = 0; i < 2000; i++) {
     h1_f48.set(dis(gen));
     h2_f16.set(dis(gen));
     h2_f48.set(dis(gen));
     const ActionEntry &entry = table->lookup(pkt, &hit, &lookup_handle);
     ASSERT_TRUE(hit);
     unsigned int data = entry.action_fn.get_action_data_at(0).get_uint();
-    if (data == data_1) hits_1++;
-    else if (data == data_2) hits_2++;
-    else FAIL();
+    if (data == data_1)
+      hits_1++;
+    else if (data == data_2)
+      hits_2++;
+    else
+      FAIL();
   }
 
   ASSERT_NEAR(hits_1, hits_2, 100);
@@ -1460,12 +1613,12 @@ TEST_F(TableIndirectWS, LookupEntryWS) {
   rc = table->delete_entry(handle);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
-  rc = table->delete_group(grp);
+  rc = action_profile.delete_group(grp);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
-  rc = table->delete_member(mbr_1);
+  rc = action_profile.delete_member(mbr_1);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
-  rc = table->delete_member(mbr_2);
+  rc = action_profile.delete_member(mbr_2);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 }
 
@@ -1479,16 +1632,16 @@ TEST_F(TableIndirectWS, GetEntries) {
   unsigned int data_1 = 666u;
   unsigned int data_2 = 777u;
 
-  rc = table->create_group(&grp);
+  rc = action_profile.create_group(&grp);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
   rc = add_member(data_1, &mbr_1);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
   rc = add_member(data_2, &mbr_2);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
-  rc = table->add_member_to_group(mbr_1, grp);
+  rc = action_profile.add_member_to_group(mbr_1, grp);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
-  rc = table->add_member_to_group(mbr_2, grp);
+  rc = action_profile.add_member_to_group(mbr_2, grp);
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
   rc = add_entry_ws(key_1, grp, &handle_1);
@@ -1497,8 +1650,8 @@ TEST_F(TableIndirectWS, GetEntries) {
   ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
 
   const auto entries = table->get_entries();
-  const auto groups = table->get_groups();
-  const auto members = table->get_members();
+  const auto groups = action_profile.get_groups();
+  const auto members = action_profile.get_members();
 
   ASSERT_EQ(2u, entries.size());
   ASSERT_EQ(1u, groups.size());
@@ -1510,6 +1663,8 @@ TEST_F(TableIndirectWS, GetEntries) {
   ASSERT_EQ(std::numeric_limits<mbr_hdl_t>::max(), e1.mbr);
   ASSERT_EQ(grp, e1.grp);
   ASSERT_EQ(-1, e1.priority);
+  ASSERT_EQ(0u, e1.timeout_ms);
+  ASSERT_EQ(0u, e1.time_since_hit_ms);
 
   const auto &g1 = groups[0];
   ASSERT_EQ(grp, g1.grp);
@@ -1530,6 +1685,105 @@ TEST_F(TableIndirectWS, GetEntries) {
   ASSERT_EQ(mbr_1, e2.mbr);
   ASSERT_EQ(std::numeric_limits<grp_hdl_t>::max(), e2.grp);
   ASSERT_EQ(-1, e2.priority);
+  ASSERT_EQ(0u, e2.timeout_ms);
+  ASSERT_EQ(0u, e2.time_since_hit_ms);
+}
+
+TEST_F(TableIndirectWS, CustomGroupSelection) {
+  using GroupSelectionIface = ActionProfile::GroupSelectionIface;
+  using hash_t = ActionProfile::hash_t;
+
+  std::set<mbr_hdl_t> mbrs;
+  grp_hdl_t grp;
+  class GroupSelection : public GroupSelectionIface {
+   public:
+    GroupSelection(std::set<mbr_hdl_t> &mbrs, grp_hdl_t &grp)
+        : mbrs(mbrs), grp(grp) { }
+
+   private:
+    void add_member_to_group(grp_hdl_t g, mbr_hdl_t m) override {
+      grp = g;
+      mbrs.insert(m);
+    }
+
+    void remove_member_from_group(grp_hdl_t g, mbr_hdl_t m) override {
+      grp = g;
+      mbrs.erase(m);
+    }
+
+    mbr_hdl_t get_from_hash(grp_hdl_t g, hash_t h) const override {
+      // std::cout << "hash " << h << "\n";
+      (void) h;
+      grp = g;
+      return *mbrs.rbegin();
+    }
+
+    void reset() override {
+      mbrs.clear();
+    }
+
+    std::set<mbr_hdl_t> &mbrs;
+    grp_hdl_t &grp;
+  };
+
+  ASSERT_EQ(&action_profile, table->get_action_profile());
+  GroupSelection selector(mbrs, grp);
+  action_profile.set_group_selector(&selector);
+
+  grp_hdl_t grp_1;
+  mbr_hdl_t mbr_1, mbr_2;
+  unsigned int data_1 = 666u, data_2 = 777u;
+  MatchErrorCode rc;
+
+  rc = action_profile.create_group(&grp_1);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+
+  auto add_member_check = [this, &mbrs, &grp, &grp_1](unsigned int data,
+                                                      mbr_hdl_t *mbr) {
+    MatchErrorCode rc;
+    rc = add_member(data, mbr);
+    ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+    rc = action_profile.add_member_to_group(*mbr, grp_1);
+    ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+    ASSERT_EQ(grp_1, grp);
+    ASSERT_EQ(1u, mbrs.count(*mbr));
+  };
+
+  ASSERT_TRUE(mbrs.empty());
+  add_member_check(data_1, &mbr_1);
+  add_member_check(data_2, &mbr_2);
+  ASSERT_EQ(2u, mbrs.size());
+
+  entry_handle_t handle, lookup_handle;
+  bool hit;
+  rc = add_entry_ws("\x0a\xba", grp_1, &handle);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+
+  auto pkt = get_pkt(64);
+  auto &h1_f16 = pkt.get_phv()->get_field(testHeader1, 0);
+  auto &h1_f48 = pkt.get_phv()->get_field(testHeader1, 1);
+  auto &h2_f16 = pkt.get_phv()->get_field(testHeader2, 0);
+  auto &h2_f48 = pkt.get_phv()->get_field(testHeader2, 1);
+
+  h1_f16.set("0xaba");
+
+  // do a few lookups, should always resolve to mbr_2
+  for (int i = 0; i < 16; i++) {
+    h1_f48.set(dis(gen));
+    h2_f16.set(dis(gen));
+    h2_f48.set(dis(gen));
+    const auto &entry = table->lookup(pkt, &hit, &lookup_handle);
+    ASSERT_TRUE(hit);
+    ASSERT_EQ(data_2, entry.action_fn.get_action_data_at(0).get<uint>());
+  }
+
+  rc = action_profile.remove_member_from_group(grp_1, mbr_1);
+  ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+  ASSERT_EQ(grp_1, grp);
+  ASSERT_EQ(1u, mbrs.size());
+
+  action_profile.reset_state();
+  ASSERT_TRUE(mbrs.empty());
 }
 
 
@@ -1551,7 +1805,7 @@ class TableBigMask : public ::testing::Test {
   void make_key_builder();
 
   TableBigMask()
-      : testHeaderType("test_t", 0), action_fn("actionA", 0),
+      : testHeaderType("test_t", 0), action_fn("actionA", 0, 0),
         phv_source(PHVSourceIface::make_phv_source()) {
     testHeaderType.push_back_field("f16", 16);
     testHeaderType.push_back_field("f48", 48);
@@ -1572,7 +1826,7 @@ class TableBigMask : public ::testing::Test {
 
   MatchErrorCode add_entry(const std::string &key_1,
                            const std::string &key_2,
-			   entry_handle_t *handle);
+                           entry_handle_t *handle);
 
   Packet get_pkt(int length) {
     // dummy packet, won't be parsed
@@ -1596,7 +1850,7 @@ template<>
 MatchErrorCode
 TableBigMask<MUExact>::add_entry(const std::string &key_1,
                                  const std::string &key_2,
-				 entry_handle_t *handle) {
+                                 entry_handle_t *handle) {
   ActionData action_data;
   std::vector<MatchKeyParam> match_key;
   match_key.emplace_back(MatchKeyParam::Type::EXACT, key_1);
@@ -1616,7 +1870,7 @@ template<>
 MatchErrorCode
 TableBigMask<MULPM>::add_entry(const std::string &key_1,
                                const std::string &key_2,
-			       entry_handle_t *handle) {
+                               entry_handle_t *handle) {
   ActionData action_data;
   std::vector<MatchKeyParam> match_key;
   match_key.emplace_back(MatchKeyParam::Type::LPM, key_1, 16);
@@ -1636,7 +1890,7 @@ template<>
 MatchErrorCode
 TableBigMask<MUTernary>::add_entry(const std::string &key_1,
                                    const std::string &key_2,
-				   entry_handle_t *handle) {
+                                   entry_handle_t *handle) {
   ActionData action_data;
   std::vector<MatchKeyParam> match_key;
   std::string mask_1 = "\xff\xff";
@@ -1659,7 +1913,7 @@ template<>
 MatchErrorCode
 TableBigMask<MURange>::add_entry(const std::string &key_1,
                                    const std::string &key_2,
-				   entry_handle_t *handle) {
+                                   entry_handle_t *handle) {
   ActionData action_data;
   std::vector<MatchKeyParam> match_key;
   Data start_1(key_1.data(), key_1.size());
@@ -1832,7 +2086,7 @@ class AdvancedTest : public ::testing::Test {
   std::unique_ptr<PHVSourceIface> phv_source{nullptr};
 
   AdvancedTest()
-      : testHeaderType("test_t", 0), action_fn("actionA", 0),
+      : testHeaderType("test_t", 0), action_fn("actionA", 0, 0),
         phv_source(PHVSourceIface::make_phv_source()) {
     testHeaderType.push_back_field("f16", 16);
     testHeaderType.push_back_field("f48", 48);
@@ -1884,7 +2138,7 @@ class AdvancedLPMTest : public AdvancedTest {
 
   MatchErrorCode add_entry(entry_handle_t *handle) {
     std::vector<MatchKeyParam> match_key;
-    //10.00/12
+    // 10.00/12
     match_key.emplace_back(MatchKeyParam::Type::LPM,
                            std::string("\x0a\x00", 2), 12);
     match_key.emplace_back(MatchKeyParam::Type::EXACT,
@@ -1968,7 +2222,7 @@ class AdvancedTernaryTest : public AdvancedTest {
 
   MatchErrorCode add_entry(entry_handle_t *handle) {
     std::vector<MatchKeyParam> match_key;
-    //10.00/12
+    // 10.00/12
     match_key.emplace_back(MatchKeyParam::Type::TERNARY,
                            std::string("\x12\x34", 2),
                            std::string("\x0f\xf0", 2));
@@ -2006,6 +2260,97 @@ TEST_F(AdvancedTernaryTest, Lookup1) {
 }
 
 
+class HiddenValidFieldTest : public AdvancedTest {
+ protected:
+  HiddenValidFieldTest()
+      : AdvancedTest() {
+    int offset = testHeaderType.get_hidden_offset(HeaderType::HiddenF::VALID);
+    key_builder.push_back_field(testHeader1, offset, 1,
+                                MatchKeyParam::Type::TERNARY);
+    key_builder.push_back_field(testHeader2, 0, 16, MatchKeyParam::Type::EXACT);
+
+    std::unique_ptr<MUTernary> match_unit;
+    match_unit = std::unique_ptr<MUTernary>(
+        new MUTernary(t_size, key_builder, &lookup_factory));
+    table = std::unique_ptr<MatchTable>(
+        new MatchTable("test_table", 0, std::move(match_unit), false));
+    table->set_next_node(0, nullptr);
+  }
+
+  virtual void SetUp() {
+    AdvancedTest::SetUp();
+  }
+
+  MatchErrorCode add_entry(const std::string &exact_v,
+                           bool is_valid, bool is_masked,
+                           entry_handle_t *handle) {
+    std::vector<MatchKeyParam> match_key;
+    // 10.00/12
+    std::string valid_key = is_valid ?
+        std::string("\x01", 1) : std::string("\x00", 1);
+    std::string valid_mask = is_masked ?
+        std::string("\x01", 1) : std::string("\x00", 1);
+    match_key.emplace_back(MatchKeyParam::Type::TERNARY,
+                           std::move(valid_key), std::move(valid_mask));
+    match_key.emplace_back(MatchKeyParam::Type::EXACT, exact_v);
+    return table->add_entry(match_key, &action_fn, ActionData(), handle);
+  }
+
+  Packet gen_pkt(const std::string &exact_v, bool is_valid) const {
+    Packet packet = Packet::make_new(
+        128, PacketBuffer(256), phv_source.get());
+    PHV *phv = packet.get_phv();
+    if (is_valid) phv->get_header(testHeader1).mark_valid();
+    phv->get_header(testHeader2).mark_valid();
+    Field &h2_f16 = phv->get_field(testHeader2, 0);
+    h2_f16.set(exact_v.data(), exact_v.size());
+    return packet;
+  }
+};
+
+TEST_F(HiddenValidFieldTest, Lookup) {
+  entry_handle_t h1, h2;
+  entry_handle_t lookup_handle;
+  bool hit;
+  const std::string exact_v_1("\xab\x15", 2);
+  const std::string exact_v_2("\xab\xcd", 2);
+
+  // needs header1 to be valid
+  ASSERT_EQ(MatchErrorCode::SUCCESS,
+            add_entry(exact_v_1, true, true, &h1));
+  // do not care about header1's validity
+  ASSERT_EQ(MatchErrorCode::SUCCESS,
+            add_entry(exact_v_2, true, false, &h2));
+
+  {
+    auto pkt = gen_pkt(exact_v_1, false);
+    table->lookup(pkt, &hit, &lookup_handle);
+    ASSERT_FALSE(hit);
+  }
+  {
+    auto pkt = gen_pkt(exact_v_2, false);
+    table->lookup(pkt, &hit, &lookup_handle);
+    ASSERT_TRUE(hit); ASSERT_EQ(h2, lookup_handle);
+  }
+  {
+    auto pkt = gen_pkt(exact_v_1, true);
+    table->lookup(pkt, &hit, &lookup_handle);
+    ASSERT_TRUE(hit); ASSERT_EQ(h1, lookup_handle);
+  }
+  {
+    auto pkt = gen_pkt(exact_v_2, true);
+    table->lookup(pkt, &hit, &lookup_handle);
+    ASSERT_TRUE(hit); ASSERT_EQ(h2, lookup_handle);
+  }
+  {
+    auto pkt = gen_pkt(exact_v_1, true);
+    pkt.get_phv()->get_header(testHeader1).mark_invalid();
+    table->lookup(pkt, &hit, &lookup_handle);
+    ASSERT_FALSE(hit);
+  }
+}
+
+
 template <typename MUType>
 class TableEntryDebug : public ::testing::Test {
  protected:
@@ -2022,7 +2367,7 @@ class TableEntryDebug : public ::testing::Test {
   int priority = 12;
 
   TableEntryDebug()
-      : testHeaderType("test_t", 0), action_fn("actionA", 0) {
+      : testHeaderType("test_t", 0), action_fn("actionA", 0, 1  /* 1 param */) {
     testHeaderType.push_back_field("f16", 16);
     testHeaderType.push_back_field("f48", 48);
     testHeaderType.push_back_field("f17", 17);
@@ -2034,41 +2379,40 @@ class TableEntryDebug : public ::testing::Test {
 
     set_key_builder();
 
-    // true enables counters
     match_unit = std::unique_ptr<MUType>(
         new MUType(t_size, key_builder, &lookup_factory));
+    // disable counters, enable ageing
     table = std::unique_ptr<MatchTable>(
-        new MatchTable("test_table", 0, std::move(match_unit), false));
+        new MatchTable("test_table", 0, std::move(match_unit), false, true));
     table->set_next_node(0, nullptr);
   }
 
-  std::vector<MatchKeyParam> gen_match_key(const char * key1="\x12\x34",
-                                           const char * key2="\xab\xcd") const;
+  std::vector<MatchKeyParam> gen_match_key(const char *key1 = "\x12\x34",
+                                           const char *key2 = "\xab\xcd") const;
 
   std::string gen_entry_string() const;
 
   MatchErrorCode add_entries() {
     entry_handle_t handle;
     MatchErrorCode rc1 =
-    table->add_entry(gen_match_key("\x12\x34","\xab\xcd"), &action_fn,
-                     action_data, &handle, priority);
+        table->add_entry(gen_match_key("\x12\x34", "\xab\xcd"), &action_fn,
+                         action_data, &handle, priority);
     if (rc1 != MatchErrorCode::SUCCESS) return rc1;
 
     MatchErrorCode rc2 =
-    table->add_entry(gen_match_key("\x34\x56","\xcd\xef"), &action_fn,
-                     action_data, &handle, priority);
+        table->add_entry(gen_match_key("\x34\x56", "\xcd\xef"), &action_fn,
+                         action_data, &handle, priority);
     if (rc2 != MatchErrorCode::SUCCESS) return rc2;
 
     MatchErrorCode rc3 =
-    table->add_entry(gen_match_key("\x56\x78","\xfe\xdc"), &action_fn,
-                     action_data, &handle, priority);
+        table->add_entry(gen_match_key("\x56\x78", "\xfe\xdc"), &action_fn,
+                         action_data, &handle, priority);
     if (rc3 != MatchErrorCode::SUCCESS) return rc3;
 
     MatchErrorCode rc4 =
-    table->add_entry(gen_match_key("\x78\x90","\xdc\xba"), &action_fn,
-                     action_data, &handle, priority);
+        table->add_entry(gen_match_key("\x78\x90", "\xdc\xba"), &action_fn,
+                         action_data, &handle, priority);
     return rc4;
-
   }
 
   MatchErrorCode add_entry(entry_handle_t *handle) {
@@ -2142,7 +2486,8 @@ TableEntryDebug<MULPM>::gen_match_key(const char *k1, const char *k2) const {
 
 template <>
 std::vector<MatchKeyParam>
-TableEntryDebug<MUTernary>::gen_match_key(const char *k1, const char *k2) const {
+TableEntryDebug<MUTernary>::gen_match_key(const char *k1,
+                                          const char *k2) const {
   std::vector<MatchKeyParam> match_key;
   match_key.emplace_back(MatchKeyParam::Type::LPM,
                          std::string(k1, 2), 12);
@@ -2279,6 +2624,27 @@ TYPED_TEST(TableEntryDebug, GetEntry) {
   this->table->get_entry(handle, &entry);
   ASSERT_TRUE(cmp_match_keys(this->gen_match_key(), entry.match_key));
   ASSERT_EQ(this->action_data.get(0), entry.action_data.get(0));
+  ASSERT_EQ(0u, entry.timeout_ms);
+  ASSERT_GT(400u, entry.time_since_hit_ms);  // 400ms just to be safe
+}
+
+TYPED_TEST(TableEntryDebug, GetEntryWTimeout) {
+  entry_handle_t handle;
+  ASSERT_EQ(MatchErrorCode::SUCCESS, this->add_entry(&handle));
+  uint32_t timeout_ms = 2345;  // 2.345 seconds
+  ASSERT_EQ(MatchErrorCode::SUCCESS,
+            this->table->set_entry_ttl(handle, timeout_ms));
+
+  uint32_t sleep_ms = 1500;
+  sleep_for(milliseconds(sleep_ms));
+  uint32_t tolerance_ms = 400;
+
+  MatchTable::Entry entry;
+  this->table->get_entry(handle, &entry);
+  ASSERT_TRUE(cmp_match_keys(this->gen_match_key(), entry.match_key));
+  ASSERT_EQ(this->action_data.get(0), entry.action_data.get(0));
+  ASSERT_EQ(timeout_ms, entry.timeout_ms);
+  ASSERT_NEAR(sleep_ms, entry.time_since_hit_ms, tolerance_ms);
 }
 
 TYPED_TEST(TableEntryDebug, DumpEntry) {
@@ -2318,7 +2684,7 @@ class TableDeadlock : public ::testing::Test {
   std::unique_ptr<PHVSourceIface> phv_source{nullptr};
 
   TableDeadlock()
-      : testHeaderType("test_t", 0), action_fn("actionA", 0),
+      : testHeaderType("test_t", 0), action_fn("actionA", 0, 1  /* 1 param */),
         phv_source(PHVSourceIface::make_phv_source()) {
     testHeaderType.push_back_field("f16", 16);
     phv_factory.push_back_header("test1", testHeader1, testHeaderType);
@@ -2328,10 +2694,10 @@ class TableDeadlock : public ::testing::Test {
     key_builder.push_back_field(testHeader1, 0, 16,
                                 MatchKeyParam::Type::EXACT, "h1.f0");
     LookupStructureFactory factory;
-    std::unique_ptr<MUExact> match_unit(new MUExact(t_size, key_builder, &factory));
+    std::unique_ptr<MUExact> match_unit(
+        new MUExact(t_size, key_builder, &factory));
     table = std::unique_ptr<MatchTable>(
-      new MatchTable("test_table", 0, std::move(match_unit), false)
-    );
+      new MatchTable("test_table", 0, std::move(match_unit), false));
     table->set_next_node(0, nullptr);
   }
 
@@ -2340,7 +2706,7 @@ class TableDeadlock : public ::testing::Test {
   }
 };
 
-extern bool WITH_VALGRIND; // defined in main.cpp
+extern bool WITH_VALGRIND;  // defined in main.cpp
 
 // used to fail because of deadlock in dump_entry_string (when called from
 // apply_action); could only be observed when bmv2 was compiled with
@@ -2414,7 +2780,7 @@ class TableBadInputKey : public ::testing::Test {
   std::unique_ptr<PHVSourceIface> phv_source{nullptr};
 
   TableBadInputKey()
-      : testHeaderType("test_t", 0), action_fn("actionA", 0),
+      : testHeaderType("test_t", 0), action_fn("actionA", 0, 0),
         phv_source(PHVSourceIface::make_phv_source()) {
     // non-aligned, to expose potential issues
     testHeaderType.push_back_field("f14", 14);
@@ -2576,7 +2942,7 @@ class TableRangeMatch : public ::testing::Test {
   std::unique_ptr<PHVSourceIface> phv_source{nullptr};
 
   TableRangeMatch()
-      : testHeaderType("test_t", 0), action_fn("actionA", 0),
+      : testHeaderType("test_t", 0), action_fn("actionA", 0, 0),
         phv_source(PHVSourceIface::make_phv_source()) {
     testHeaderType.push_back_field("f16", 16);
     testHeaderType.push_back_field("f48", 48);
@@ -2655,7 +3021,6 @@ TEST_F(TableRangeMatch, TwoRanges) {
   ActionData action_data;
   std::vector<MatchKeyParam> match_key;
   unsigned int start_1 = 0xab, start_2 = 0x8888;
-  unsigned int end_1 = 0x041d, end_2 = 0x8889;
   int priority = 1;
   match_key.emplace_back(MatchKeyParam::Type::RANGE,
                          std::string("\x00\xab", 2),
@@ -2683,4 +3048,186 @@ TEST_F(TableRangeMatch, TwoRanges) {
   check_one(start_1, 1, false);
   check_one(1, 1, false);
   // TODO(antonin): more checks?
+}
+
+
+namespace {
+
+class MaskBitBuilder {
+ public:
+  MaskBitBuilder(size_t nbytes)
+      : bits_(nbytes, '\0') { }
+
+  void append_one(bool bit) {
+    int offset = nbits_ % 8;
+    if (bit) bits_[nbits_ / 8] |= (1 << (7 - offset));
+    nbits_ += 1;
+  }
+
+  const std::string &bytes() const { return bits_; }
+
+ private:
+  std::string bits_{};
+  int nbits_{0};
+};
+
+}  // namespace
+
+class TableTernaryCache : public ::testing::Test {
+ protected:
+  static constexpr size_t t_size = 1024u;
+
+  PHVFactory phv_factory;
+
+  HeaderType testHeaderType;
+  header_id_t testHeader{0};
+  ActionFn action_fn;
+
+  std::unique_ptr<PHVSourceIface> phv_source{nullptr};
+
+  TableTernaryCache()
+      : testHeaderType("test_t", 0), action_fn("actionA", 0, 0),
+        phv_source(PHVSourceIface::make_phv_source()) {
+    testHeaderType.push_back_field("f128", 128);
+    phv_factory.push_back_header("testHdr", testHeader, testHeaderType);
+  }
+
+  Packet get_pkt(const std::string &binary_str) {
+    // dummy packet, won't be parsed
+    Packet packet = Packet::make_new(128, PacketBuffer(256), phv_source.get());
+    auto phv = packet.get_phv();
+    auto &hdr = phv->get_header(testHeader);
+    hdr.mark_valid();
+    hdr.get_field(0).set(binary_str.data(), binary_str.size());  // f128
+    return packet;
+  }
+
+  std::unique_ptr<MatchTable> create_table(LookupStructureFactory *factory) {
+    MatchKeyBuilder key_builder;
+    key_builder.push_back_field(testHeader, 0, 128,
+                                MatchKeyParam::Type::TERNARY);
+    std::unique_ptr<MUTernary> match_unit(
+        new MUTernary(t_size, key_builder, factory));
+
+    std::unique_ptr<MatchTable> table(
+        new MatchTable("test_table", 0, std::move(match_unit), false));
+    table->set_next_node(0, nullptr);
+    return table;
+  }
+
+  MatchErrorCode add_entry(MatchTable *table,
+                           const std::string &binary_key,
+                           const std::string &binary_mask,
+                           int priority, entry_handle_t *h) {
+    std::vector<MatchKeyParam> match_key;
+    match_key.emplace_back(MatchKeyParam::Type::TERNARY, binary_key,
+                           binary_mask);
+    return table->add_entry(match_key, &action_fn, ActionData(), h, priority);
+  }
+
+  // add entries of the form binary_key && 11111...0000
+  // for a key of 128 bits, there are 128 such enties
+  // the last entry has the lowest prioiry value (1), which translates into the
+  // highest priority for lookup; its handle is returned
+  void add_base_entries(MatchTable *table, const std::string &binary_key,
+                        entry_handle_t *last_handle) {
+    // cache is activated if more than 16 entries in table
+    size_t num_entries_to_add = binary_key.size() * 8;
+    MaskBitBuilder mask_builder(binary_key.size());
+    for (size_t i = 0; i < num_entries_to_add; i++) {
+      int priority = num_entries_to_add - i;
+      mask_builder.append_one(true);
+      auto rc = add_entry(table, binary_key, mask_builder.bytes(), priority,
+                          last_handle);
+      ASSERT_EQ(MatchErrorCode::SUCCESS, rc);
+    }
+  }
+
+  void lookup(MatchTable *table, const std::string &binary_key,
+              entry_handle_t *lookup_handle) {
+    bool hit;
+    auto pkt = get_pkt(binary_key);
+    table->lookup(pkt, &hit, lookup_handle);
+    ASSERT_TRUE(hit);
+  }
+
+  void run_test(bool enable_cache, size_t num_packets) {
+    LookupStructureFactory factory(enable_cache);
+    auto table = create_table(&factory);
+
+    constexpr size_t nbytes = 128 / 8;
+    const std::string binary_key(nbytes, '\xff');
+    entry_handle_t h;
+    add_base_entries(table.get(), binary_key, &h);
+
+    for (size_t i = 0; i < num_packets; i++) {
+      entry_handle_t lookup_handle;
+      lookup(table.get(), binary_key, &lookup_handle);
+      ASSERT_EQ(h, lookup_handle);
+    }
+  }
+
+  virtual void SetUp() {
+    phv_source->set_phv_factory(0, &phv_factory);
+  }
+
+  // virtual void TearDown() { }
+};
+
+TEST_F(TableTernaryCache, LookupWithCache) {
+  run_test(true  /* with cache */, 1);
+}
+
+TEST_F(TableTernaryCache, LookupWithoutCache) {
+  run_test(false  /* without cache */, 1);
+}
+
+TEST_F(TableTernaryCache, LookupCmp) {
+  auto run = [this](bool enable_cache) {
+    using clock = std::chrono::high_resolution_clock;
+    using std::chrono::milliseconds;
+    using std::chrono::duration_cast;
+
+    auto tp1 = clock::now();
+    run_test(enable_cache, 1000);
+    auto tp2 = clock::now();
+    return duration_cast<milliseconds>(tp2 - tp1).count();
+  };
+
+  auto time_with = run(true);
+  auto time_without = run(false);
+
+  if (!WITH_VALGRIND) {
+    // on my machine, compiling with O0, time_with = 10ms, time_without = 60ms
+    EXPECT_LT(time_with, time_without);
+  }
+}
+
+// test cache correctness when an entry is added then removed
+TEST_F(TableTernaryCache, CacheUpdate) {
+    LookupStructureFactory factory(true  /* with cache */);
+    auto table = create_table(&factory);
+
+    constexpr size_t nbytes = 128 / 8;
+    const std::string binary_key(nbytes, '\xff');
+    entry_handle_t h;
+    add_base_entries(table.get(), binary_key, &h);
+
+    entry_handle_t lookup_handle;
+    lookup(table.get(), binary_key, &lookup_handle);  // cache hit
+    ASSERT_EQ(h, lookup_handle);
+
+    // add a new entry, check that it is being hit
+    entry_handle_t new_h;
+    // priority 0 is lower than all the other ones in the table
+    ASSERT_EQ(MatchErrorCode::SUCCESS,
+              add_entry(table.get(), binary_key, binary_key, 0, &new_h));
+    ASSERT_NE(h, new_h);
+    lookup(table.get(), binary_key, &lookup_handle);
+    ASSERT_EQ(new_h, lookup_handle);
+
+    // remove new entry, check that old entry is used again
+    ASSERT_EQ(MatchErrorCode::SUCCESS, table->delete_entry(new_h));
+    lookup(table.get(), binary_key, &lookup_handle);
+    ASSERT_EQ(h, lookup_handle);
 }

@@ -75,10 +75,11 @@
 #include <typeindex>
 #include <set>
 #include <vector>
+#include <iosfwd>
+#include <condition_variable>
 
 #include "context.h"
 #include "queue.h"
-#include "packet.h"
 #include "learning.h"
 #include "runtime_interface.h"
 #include "dev_mgr.h"
@@ -87,6 +88,8 @@
 #include "target_parser.h"
 
 namespace bm {
+
+class Packet;
 
 // multiple inheritance in accordance with Google C++ guidelines:
 // "Multiple inheritance is allowed only when all superclasses, with the
@@ -111,18 +114,15 @@ class SwitchWContexts : public DevMgr, public RuntimeInterface {
     return &contexts.at(cxt_id);
   }
 
-  //! Your implementation will be called every time a new packet is received by
-  //! the device.
-  virtual int receive(int port_num, const char *buffer, int len) = 0;
+  int receive(int port_num, const char *buffer, int len);
 
-  //! Do all your initialization in this function (e.g. start processing
-  //! threads) and call this function when you are ready to process packets.
-  virtual void start_and_return() = 0;
-
-  //! You can override this method in your target. It will be called whenever
-  //! reset_state() is invoked by the control plane. For example, the
-  //! simple_switch target uses this to reset PRE state.
-  virtual void reset_target_state() { }
+  //! Call this function when you are ready to process packets. This function
+  //! will call start_and_return_() which you have to override in your switch
+  //! implementation. Note that if the switch is started without a P4
+  //! configuration, this function will block until a P4 configuration is
+  //! available (you can push a configuration through the Thrift RPC service)
+  //! before calling start_and_return_().
+  void start_and_return();
 
   //! Returns the Thrift port used for the runtime RPC server.
   int get_runtime_port() const { return thrift_port; }
@@ -192,6 +192,8 @@ class SwitchWContexts : public DevMgr, public RuntimeInterface {
   int init_objects(const std::string &json_path, int device_id = 0,
                    std::shared_ptr<TransportIface> notif_transport = nullptr);
 
+  int init_objects_empty(int dev_id, std::shared_ptr<TransportIface> transport);
+
   //! Initialize the switch using command line options. This function is meant
   //! to be called right after your switch instance has been constructed. For
   //! example, in the case of the standard simple switch target:
@@ -209,8 +211,18 @@ class SwitchWContexts : public DevMgr, public RuntimeInterface {
   //! @code
   //! <my_target_exe> prog.json -i 0@eth0 -- --my-option v
   //! @endcode
-  int init_from_command_line_options(int argc, char *argv[],
-                                     TargetParserIface *tp = nullptr);
+  //! If you wish to use your own TransportIface implementation for
+  //! notifications instead of the default nanomsg one, you can provide
+  //! one. Similarly if you want to provide your own DevMgrIface implementation
+  //! for packet I/O, you can do so. Note that even when using your own
+  //! DevMgrIface implementation, you can still use the `--interface` (or `-i`)
+  //! command-line option; we will call port_add on your implementation
+  //! appropriately.
+  int init_from_command_line_options(
+      int argc, char *argv[],
+      TargetParserIface *tp = nullptr,
+      std::shared_ptr<TransportIface> my_transport = nullptr,
+      std::unique_ptr<DevMgrIface> my_dev_mgr = nullptr);
 
   //! Retrieve the shared pointer to an object of type `T` previously added to
   //! the switch using add_component().
@@ -246,33 +258,47 @@ class SwitchWContexts : public DevMgr, public RuntimeInterface {
                                          packet_id_t id, int ingress_length,
                                          // cpplint false positive
                                          // NOLINTNEXTLINE(whitespace/operators)
-                                         PacketBuffer &&buffer) {
-    boost::shared_lock<boost::shared_mutex> lock(ongoing_swap_mutex);
-    return std::unique_ptr<Packet>(new Packet(
-        cxt_id, ingress_port, id, 0u, ingress_length, std::move(buffer),
-        phv_source.get()));
-  }
+                                         PacketBuffer &&buffer);
 
   //! @copydoc new_packet_ptr
   Packet new_packet(size_t cxt_id, int ingress_port, packet_id_t id,
                     // cpplint false positive
                     // NOLINTNEXTLINE(whitespace/operators)
-                    int ingress_length, PacketBuffer &&buffer) {
-    boost::shared_lock<boost::shared_mutex> lock(ongoing_swap_mutex);
-    return Packet(cxt_id, ingress_port, id, 0u, ingress_length,
-                  std::move(buffer), phv_source.get());
-  }
+                    int ingress_length, PacketBuffer &&buffer);
 
   //! Obtain a pointer to the LearnEngine for a given Context
-  LearnEngine *get_learn_engine(size_t cxt_id) {
+  LearnEngineIface *get_learn_engine(size_t cxt_id) {
     return contexts.at(cxt_id).get_learn_engine();
   }
 
-  AgeingMonitor *get_ageing_monitor(size_t cxt_id) {
+  AgeingMonitorIface *get_ageing_monitor(size_t cxt_id) {
     return contexts.at(cxt_id).get_ageing_monitor();
   }
 
+  //! Return string-to-string map of the target-specific options included in the
+  //! input config JSON for a given context.
+  ConfigOptionMap get_config_options(size_t cxt_id) const {
+    return contexts.at(cxt_id).get_config_options();
+  }
+
+  //! Return a copy of the error codes map (a bi-directional map between an
+  //! error code's integral value and its name / description) for a given
+  //! context.
+  ErrorCodeMap get_error_codes(size_t cxt_id) const {
+    return contexts.at(cxt_id).get_error_codes();
+  }
+
+  // meant for testing
+  int transport_send_probe(uint64_t x) const;
+
   // ---------- RuntimeInterface ----------
+
+  MatchErrorCode
+  mt_get_num_entries(size_t cxt_id,
+                     const std::string &table_name,
+                     size_t *num_entries) const override {
+    return contexts.at(cxt_id).mt_get_num_entries(table_name, num_entries);
+  }
 
   MatchErrorCode
   mt_add_entry(size_t cxt_id,
@@ -321,32 +347,93 @@ class SwitchWContexts : public DevMgr, public RuntimeInterface {
     return contexts.at(cxt_id).mt_set_entry_ttl(table_name, handle, ttl_ms);
   }
 
+  // action profiles
+
   MatchErrorCode
-  mt_indirect_add_member(size_t cxt_id,
-                         const std::string &table_name,
+  mt_act_prof_add_member(size_t cxt_id,
+                         const std::string &act_prof_name,
                          const std::string &action_name,
                          ActionData action_data,
                          mbr_hdl_t *mbr) override {
-    return contexts.at(cxt_id).mt_indirect_add_member(
-        table_name, action_name, std::move(action_data), mbr);
+    return contexts.at(cxt_id).mt_act_prof_add_member(
+        act_prof_name, action_name, std::move(action_data), mbr);
   }
 
   MatchErrorCode
-  mt_indirect_delete_member(size_t cxt_id,
-                            const std::string &table_name,
+  mt_act_prof_delete_member(size_t cxt_id,
+                            const std::string &act_prof_name,
                             mbr_hdl_t mbr) override {
-    return contexts.at(cxt_id).mt_indirect_delete_member(table_name, mbr);
+    return contexts.at(cxt_id).mt_act_prof_delete_member(act_prof_name, mbr);
   }
 
   MatchErrorCode
-  mt_indirect_modify_member(size_t cxt_id,
-                            const std::string &table_name,
-                            mbr_hdl_t mbr_hdl,
+  mt_act_prof_modify_member(size_t cxt_id,
+                            const std::string &act_prof_name,
+                            mbr_hdl_t mbr,
                             const std::string &action_name,
                             ActionData action_data) override {
-    return contexts.at(cxt_id).mt_indirect_modify_member(
-        table_name, mbr_hdl, action_name, std::move(action_data));
+    return contexts.at(cxt_id).mt_act_prof_modify_member(
+        act_prof_name, mbr, action_name, std::move(action_data));
   }
+
+  MatchErrorCode
+  mt_act_prof_create_group(size_t cxt_id,
+                           const std::string &act_prof_name,
+                           grp_hdl_t *grp) override {
+    return contexts.at(cxt_id).mt_act_prof_create_group(act_prof_name, grp);
+  }
+
+  MatchErrorCode
+  mt_act_prof_delete_group(size_t cxt_id,
+                           const std::string &act_prof_name,
+                           grp_hdl_t grp) override {
+    return contexts.at(cxt_id).mt_act_prof_delete_group(act_prof_name, grp);
+  }
+
+  MatchErrorCode
+  mt_act_prof_add_member_to_group(size_t cxt_id,
+                                  const std::string &act_prof_name,
+                                  mbr_hdl_t mbr, grp_hdl_t grp) override {
+    return contexts.at(cxt_id).mt_act_prof_add_member_to_group(
+        act_prof_name, mbr, grp);
+  }
+
+  MatchErrorCode
+  mt_act_prof_remove_member_from_group(size_t cxt_id,
+                                       const std::string &act_prof_name,
+                                       mbr_hdl_t mbr, grp_hdl_t grp) override {
+    return contexts.at(cxt_id).mt_act_prof_remove_member_from_group(
+        act_prof_name, mbr, grp);
+  }
+
+  std::vector<ActionProfile::Member>
+  mt_act_prof_get_members(size_t cxt_id,
+                          const std::string &act_prof_name) const override {
+    return contexts.at(cxt_id).mt_act_prof_get_members(act_prof_name);
+  }
+
+  MatchErrorCode
+  mt_act_prof_get_member(size_t cxt_id, const std::string &act_prof_name,
+                         mbr_hdl_t mbr,
+                         ActionProfile::Member *member) const override {
+    return contexts.at(cxt_id).mt_act_prof_get_member(
+        act_prof_name, mbr, member);
+  }
+
+  std::vector<ActionProfile::Group>
+  mt_act_prof_get_groups(size_t cxt_id,
+                         const std::string &act_prof_name) const override {
+    return contexts.at(cxt_id).mt_act_prof_get_groups(act_prof_name);
+  }
+
+  MatchErrorCode
+  mt_act_prof_get_group(size_t cxt_id, const std::string &act_prof_name,
+                        grp_hdl_t grp,
+                        ActionProfile::Group *group) const override {
+    return contexts.at(cxt_id).mt_act_prof_get_group(act_prof_name, grp, group);
+  }
+
+  // indirect tables
 
   MatchErrorCode
   mt_indirect_add_entry(size_t cxt_id,
@@ -389,37 +476,6 @@ class SwitchWContexts : public DevMgr, public RuntimeInterface {
                                  const std::string &table_name,
                                  mbr_hdl_t mbr) override {
     return contexts.at(cxt_id).mt_indirect_set_default_member(table_name, mbr);
-  }
-
-  MatchErrorCode
-  mt_indirect_ws_create_group(size_t cxt_id,
-                              const std::string &table_name,
-                              grp_hdl_t *grp) override {
-    return contexts.at(cxt_id).mt_indirect_ws_create_group(table_name, grp);
-  }
-
-  MatchErrorCode
-  mt_indirect_ws_delete_group(size_t cxt_id,
-                              const std::string &table_name,
-                              grp_hdl_t grp) override {
-    return contexts.at(cxt_id).mt_indirect_ws_delete_group(table_name, grp);
-  }
-
-  MatchErrorCode
-  mt_indirect_ws_add_member_to_group(size_t cxt_id,
-                                     const std::string &table_name,
-                                     mbr_hdl_t mbr, grp_hdl_t grp) override {
-    return contexts.at(cxt_id).mt_indirect_ws_add_member_to_group(
-        table_name, mbr, grp);
-  }
-
-  MatchErrorCode
-  mt_indirect_ws_remove_member_from_group(size_t cxt_id,
-                                          const std::string &table_name,
-                                          mbr_hdl_t mbr,
-                                          grp_hdl_t grp) override {
-    return contexts.at(cxt_id).mt_indirect_ws_remove_member_from_group(
-        table_name, mbr, grp);
   }
 
   MatchErrorCode
@@ -518,31 +574,32 @@ class SwitchWContexts : public DevMgr, public RuntimeInterface {
         table_name, entry);
   }
 
-  std::vector<MatchTableIndirect::Member>
-  mt_indirect_get_members(size_t cxt_id,
-                          const std::string &table_name) const override {
-    return contexts.at(cxt_id).mt_indirect_get_members(table_name);
+  MatchErrorCode
+  mt_get_entry_from_key(size_t cxt_id, const std::string &table_name,
+                        const std::vector<MatchKeyParam> &match_key,
+                        MatchTable::Entry *entry,
+                        int priority = 1) const override {
+    return contexts.at(cxt_id).mt_get_entry_from_key<MatchTable>(
+        table_name, match_key, entry, priority);
   }
 
   MatchErrorCode
-  mt_indirect_get_member(size_t cxt_id, const std::string &table_name,
-                         mbr_hdl_t mbr,
-                         MatchTableIndirect::Member *member) const override {
-    return contexts.at(cxt_id).mt_indirect_get_member(table_name, mbr, member);
-  }
-
-  std::vector<MatchTableIndirectWS::Group>
-  mt_indirect_ws_get_groups(size_t cxt_id,
-                            const std::string &table_name) const override {
-    return contexts.at(cxt_id).mt_indirect_ws_get_groups(table_name);
+  mt_indirect_get_entry_from_key(size_t cxt_id, const std::string &table_name,
+                                 const std::vector<MatchKeyParam> &match_key,
+                                 MatchTableIndirect::Entry *entry,
+                                 int priority = 1) const override {
+    return contexts.at(cxt_id).mt_get_entry_from_key<MatchTableIndirect>(
+        table_name, match_key, entry, priority);
   }
 
   MatchErrorCode
-  mt_indirect_ws_get_group(size_t cxt_id, const std::string &table_name,
-                           grp_hdl_t grp,
-                           MatchTableIndirectWS::Group *group) const override {
-    return contexts.at(cxt_id).mt_indirect_ws_get_group(
-        table_name, grp, group);
+  mt_indirect_ws_get_entry_from_key(size_t cxt_id,
+                                    const std::string &table_name,
+                                    const std::vector<MatchKeyParam> &match_key,
+                                    MatchTableIndirectWS::Entry *entry,
+                                    int priority = 1) const override {
+    return contexts.at(cxt_id).mt_get_entry_from_key<MatchTableIndirectWS>(
+        table_name, match_key, entry, priority);
   }
 
   MatchErrorCode
@@ -702,8 +759,8 @@ class SwitchWContexts : public DevMgr, public RuntimeInterface {
   // ---------- End RuntimeInterface ----------
 
  protected:
-  typedef Context::header_field_pair header_field_pair;
-  typedef Context::ForceArith ForceArith;
+  using header_field_pair = Context::header_field_pair;
+  using ForceArith = Context::ForceArith;
 
   const std::set<header_field_pair> &get_required_fields() const {
     return required_fields;
@@ -742,6 +799,27 @@ class SwitchWContexts : public DevMgr, public RuntimeInterface {
 
   int deserialize(std::istream *in);
   int deserialize_from_file(const std::string &state_dump_path);
+
+ private:
+  int init_objects(std::istream *is, int dev_id,
+                   std::shared_ptr<TransportIface> transport);
+
+  void reset_target_state();
+
+  //! Override in your switch implementation; it will be called every time a
+  //! packet is received.
+  virtual int receive_(int port_num, const char *buffer, int len) = 0;
+
+  //! Override in your switch implementation; do all your initialization in this
+  //! function (e.g. start processing threads) and call start_and_return() when
+  //! you are ready to process packets. See start_and_return() for more
+  //! information.
+  virtual void start_and_return_() = 0;
+
+  //! You can override this method in your target. It will be called whenever
+  //! reset_state() is invoked by the control plane. For example, the
+  //! simple_switch target uses this to reset PRE state.
+  virtual void reset_target_state_() { }
 
  private:
   size_t nb_cxts{};
@@ -783,7 +861,9 @@ class SwitchWContexts : public DevMgr, public RuntimeInterface {
 
   mutable boost::shared_mutex ongoing_swap_mutex{};
 
-  std::string current_config{};
+  std::string current_config{"{}"};  // empty JSON config
+  bool config_loaded{false};
+  mutable std::condition_variable config_loaded_cv{};
   mutable std::mutex config_mutex{};
 
   std::string event_logger_addr{};
@@ -815,10 +895,7 @@ class Switch : public SwitchWContexts {
                                          packet_id_t id, int ingress_length,
                                          // cpplint false positive
                                          // NOLINTNEXTLINE(whitespace/operators)
-                                         PacketBuffer &&buffer) {
-    return new_packet_ptr(0u, ingress_port, id, ingress_length,
-                          std::move(buffer));
-  }
+                                         PacketBuffer &&buffer);
 
   // to avoid C++ name hiding
   using SwitchWContexts::new_packet;
@@ -827,27 +904,28 @@ class Switch : public SwitchWContexts {
   Packet new_packet(int ingress_port, packet_id_t id, int ingress_length,
                     // cpplint false positive
                     // NOLINTNEXTLINE(whitespace/operators)
-                    PacketBuffer &&buffer) {
-    return new_packet(0u, ingress_port, id, ingress_length, std::move(buffer));
-  }
+                    PacketBuffer &&buffer);
 
   //! Return a raw, non-owning pointer to Pipeline \p name. This pointer will be
   //! invalidated if a configuration swap is performed by the target. See
-  //! switch.h documentation for details.
+  //! switch.h documentation for details. Return a nullptr if there is no
+  //! pipeline with this name.
   Pipeline *get_pipeline(const std::string &name) {
     return get_context(0)->get_pipeline(name);
   }
 
   //! Return a raw, non-owning pointer to Parser \p name. This pointer will be
   //! invalidated if a configuration swap is performed by the target. See
-  //! switch.h documentation for details.
+  //! switch.h documentation for details. Return a nullptr if there is no parser
+  //! with this name.
   Parser *get_parser(const std::string &name) {
     return get_context(0)->get_parser(name);
   }
 
   //! Return a raw, non-owning pointer to Deparser \p name. This pointer will be
   //! invalidated if a configuration swap is performed by the target. See
-  //! switch.h documentation for details.
+  //! switch.h documentation for details. Return a nullptr if there is no
+  //! deparser with this name.
   Deparser *get_deparser(const std::string &name) {
     return get_context(0)->get_deparser(name);
   }
@@ -872,14 +950,28 @@ class Switch : public SwitchWContexts {
   // to avoid C++ name hiding
   using SwitchWContexts::get_learn_engine;
   //! Obtain a pointer to the LearnEngine for this Switch instance
-  LearnEngine *get_learn_engine() {
+  LearnEngineIface *get_learn_engine() {
     return get_learn_engine(0);
   }
 
   // to avoid C++ name hiding
   using SwitchWContexts::get_ageing_monitor;
-  AgeingMonitor *get_ageing_monitor() {
+  AgeingMonitorIface *get_ageing_monitor() {
     return get_ageing_monitor(0);
+  }
+
+  // to avoid C++ name hiding
+  using SwitchWContexts::get_config_options;
+  ConfigOptionMap get_config_options() const {
+    return get_config_options(0);
+  }
+
+  // to avoid C++ name hiding
+  using SwitchWContexts::get_error_codes;
+  //! Return a copy of the error codes map (a bi-directional map between an
+  //! error code's integral value and its name / description) for the switch.
+  ErrorCodeMap get_error_codes() const {
+    return get_error_codes(0);
   }
 
   //! Add a component to this Switch. Each Switch maintains a map `T` ->

@@ -18,16 +18,16 @@
  *
  */
 
+#include <netinet/in.h>
+
+#include <boost/filesystem.hpp>
+
 #include <vector>
 #include <string>
 #include <iostream>
 #include <memory>
 
 #include <cassert>
-
-#include <netinet/in.h>
-
-#include <boost/filesystem.hpp>
 
 #include "stress_utils.h"
 
@@ -120,6 +120,10 @@ int main(int argc, char* argv[]) {
       parser->parse(pkt);
       ingress->apply(pkt);
       deparser->deparse(pkt);
+      // need to reset headers (i.e. mark them invalid) since we are re-using
+      // the same Packet objects, otherwise we get a parser error
+      // (OverwritingHeader)
+      pkt->get_phv()->reset();
     }
   }
   chrono.end();

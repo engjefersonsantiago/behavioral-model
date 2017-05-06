@@ -36,16 +36,17 @@
 #include <cassert>
 
 #include "packet_buffer.h"
+#include "parser_error.h"
 #include "phv_source.h"
-#include "phv.h"
+#include "phv_forward.h"
 
 namespace bm {
 
 //! Integral type used to identify a given data packet
-typedef uint64_t packet_id_t;
+using packet_id_t = uint64_t;
 
 //! Integral type used to distinguish between different clones of a packet
-typedef uint64_t copy_id_t;
+using copy_id_t = uint64_t;
 
 class CopyIdGenerator {
  private:
@@ -95,12 +96,15 @@ class Packet final {
   friend class Switch;
 
  public:
-  typedef std::chrono::system_clock clock;
+  using clock = std::chrono::system_clock;
 
-  typedef PacketBuffer::state_t buffer_state_t;
+  using buffer_state_t = PacketBuffer::state_t;
 
   //! Number of general purpose registers per packet
   static constexpr size_t nb_registers = 2u;
+
+  static constexpr size_t INVALID_ENTRY_INDEX =
+      std::numeric_limits<size_t>::max();
 
   ~Packet();
 
@@ -141,6 +145,8 @@ class Packet final {
   //! packet. This is not updated as headers are marked valid / invalid and the
   //! length of the outgoing packet may be different.
   int get_ingress_length() const { return ingress_length; }
+
+  void set_ingress_length(int ing_len) { ingress_length = ing_len; }
 
   void set_payload_size(size_t size) { payload_size = size; }
 
@@ -217,6 +223,17 @@ class Packet final {
   void set_register(size_t idx, uint64_t v) { registers.at(idx) = v; }
   //! Read general purpose register at index \p idx
   uint64_t get_register(size_t idx) { return registers.at(idx); }
+
+  void set_entry_index(size_t idx) { entry_index = idx; }
+  //! Get the index of the entry returned by the last match table lookup, or
+  //! Packet::INVALID_ENTRY_INDEX if lookup was a miss.
+  size_t get_entry_index() const { return entry_index; }
+
+  void set_error_code(const ErrorCode &code) { error_code = code; }
+  //! Get the error code for this Packet, as set by the most recent Parser
+  //! object the packet went through. For most packets, this error code should
+  //! be set to "NoError".
+  ErrorCode get_error_code() const { return error_code; }
 
   //! Mark the packet for exit by setting an exit flag. If this is called from
   //! an action, the current pipeline will be interrupted as soon as the current
@@ -338,13 +355,19 @@ class Packet final {
   clock::time_point ingress_ts{};
   uint64_t ingress_ts_ms{};
 
-  std::unique_ptr<PHV> phv{nullptr};
+  std::unique_ptr<PHV> phv;
 
   PHVSourceIface *phv_source{nullptr};
 
   // General purpose registers available to a target, they can be written with
   // Packet::set_register and read with Packet::get_register
   std::array<uint64_t, nb_registers> registers;
+
+  // Used to store the index of the entry returned by the last match table
+  // lookup; INVALID_ENTRY_INDEX if lookup was a miss.
+  size_t entry_index{INVALID_ENTRY_INDEX};
+
+  ErrorCode error_code{ErrorCode::make_invalid()};
 
  private:
   static CopyIdGenerator *copy_id_gen;

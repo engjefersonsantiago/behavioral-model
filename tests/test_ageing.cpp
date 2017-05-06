@@ -20,16 +20,18 @@
 
 #include <gtest/gtest.h>
 
+#include <bm/bm_sim/ageing.h>
+#include <bm/bm_sim/match_tables.h>
+
 #include <memory>
 #include <string>
 #include <mutex>
 #include <thread>
 #include <condition_variable>
 #include <chrono>
+#include <vector>
 
 #include <cassert>
-
-#include <bm/bm_sim/ageing.h>
 
 #include "utils.h"
 
@@ -41,10 +43,10 @@ using std::this_thread::sleep_for;
 
 // Google Test fixture for learning tests
 class AgeingTest : public ::testing::Test {
-protected:
-  typedef std::chrono::high_resolution_clock clock;
+ protected:
+  using clock = std::chrono::high_resolution_clock;
 
-protected:
+ protected:
   PHVFactory phv_factory;
 
   const int device_id = 0;
@@ -60,7 +62,7 @@ protected:
   std::shared_ptr<MemoryAccessor> ageing_writer;
   char buffer[4096];
 
-  std::unique_ptr<AgeingMonitor> ageing_monitor;
+  std::unique_ptr<AgeingMonitorIface> ageing_monitor;
 
   clock::time_point start;
 
@@ -68,7 +70,7 @@ protected:
 
   AgeingTest()
       : testHeaderType("test_t", 0),
-        action_fn("actionA", 0),
+        action_fn("actionA", 0, 0),
         ageing_writer(new MemoryAccessor(4096)),
         phv_source(PHVSourceIface::make_phv_source()) {
     testHeaderType.push_back_field("f16", 16);
@@ -78,8 +80,7 @@ protected:
 
     key_builder.push_back_field(testHeader1, 0, 16, MatchKeyParam::Type::EXACT);
 
-    typedef MatchTableAbstract::ActionEntry ActionEntry;
-    typedef MatchUnitExact<ActionEntry> MUExact;
+    using MUExact = MatchUnitExact<ActionEntry>;
 
     LookupStructureFactory factory;
 
@@ -87,8 +88,7 @@ protected:
 
     // counters disabled, ageing enabled
     table = std::unique_ptr<MatchTable>(
-      new MatchTable("test_table", 0, std::move(match_unit), false, true)
-    );
+      new MatchTable("test_table", 0, std::move(match_unit), false, true));
     table->set_next_node(0, nullptr);
   }
 
@@ -110,13 +110,13 @@ protected:
   }
 
   MatchErrorCode add_entry(const std::string &key, entry_handle_t *handle,
-			   unsigned int ttl_ms) {
+                           unsigned int ttl_ms) {
     ActionData action_data;
     std::vector<MatchKeyParam> match_key;
     match_key.emplace_back(MatchKeyParam::Type::EXACT, key);
     MatchErrorCode rc;
     rc = table->add_entry(match_key, &action_fn, action_data, handle);
-    if(rc != MatchErrorCode::SUCCESS) return rc;
+    if (rc != MatchErrorCode::SUCCESS) return rc;
     return table->set_entry_ttl(*handle, ttl_ms);
   }
 
@@ -136,8 +136,8 @@ protected:
   }
 
   void init_monitor(unsigned int sweep_int) {
-    ageing_monitor = std::unique_ptr<AgeingMonitor>(
-        new AgeingMonitor(device_id, cxt_id, ageing_writer, sweep_int));
+    ageing_monitor = AgeingMonitorIface::make(
+        device_id, cxt_id, ageing_writer, sweep_int);
     ageing_monitor->add_table(table.get());
   }
 };
@@ -147,7 +147,7 @@ TEST_F(AgeingTest, OneNotification) {
   std::string key("0x0aba");
   entry_handle_t handle_1;
   entry_handle_t lookup_handle;
-  unsigned int sweep_int = 200u; // use it as timeout too
+  unsigned int sweep_int = 200u;  // use it as timeout too
   init_monitor(sweep_int);
   ASSERT_EQ(MatchErrorCode::SUCCESS, add_entry(key_, &handle_1, sweep_int));
   ASSERT_NE(MemoryAccessor::Status::CAN_READ, ageing_writer->check_status());
@@ -174,7 +174,6 @@ TEST_F(AgeingTest, NoDuplicate) {
   std::string key_("\x0a\xba");
   std::string key("0x0aba");
   entry_handle_t handle_1;
-  entry_handle_t lookup_handle;
   unsigned int sweep_int = 200u;
   init_monitor(sweep_int);
   auto tp1 = clock::now();

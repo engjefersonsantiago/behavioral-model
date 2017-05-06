@@ -13,6 +13,8 @@
  * limitations under the License.
  */
 
+#include <gtest/gtest.h>
+
 #include <bm/bm_sim/dev_mgr.h>
 #include <bm/bm_sim/port_monitor.h>
 #include <bm/bm_apps/packet_pipe.h>
@@ -20,13 +22,14 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
-#include <gtest/gtest.h>
 #include <iostream>
 #include <map>
 #include <unordered_map>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <string>
+#include <vector>
 
 #include "utils.h"
 
@@ -35,11 +38,10 @@ using namespace bm;
 using testing::Types;
 
 class TestDevMgrImp : public DevMgrIface {
-
-public:
+ public:
   TestDevMgrImp() {
     // 0 is device_id
-    p_monitor = std::move(PortMonitorIface::make_active(0));
+    p_monitor = PortMonitorIface::make_active(0);
   }
 
   // Not part of public interface, just for testing
@@ -65,7 +67,7 @@ public:
     }
   }
 
-private:
+ private:
   bool port_is_up_(port_t port) const override {
     std::lock_guard<std::mutex> lock(status_mutex);
     auto it = port_status.find(port);
@@ -100,14 +102,18 @@ private:
     return ReturnCode::SUCCESS;
   }
 
-  ReturnCode set_packet_handler_(const PacketHandler &handler, void *cookie)
-      override{
+  ReturnCode set_packet_handler_(const PacketHandler &handler,
+                                 void *cookie) override {
     (void) handler;
     (void) cookie;
     return ReturnCode::SUCCESS;
   }
 
-  void transmit_fn_(int port_num, const char *buffer, int len) override {}
+  void transmit_fn_(int port_num, const char *buffer, int len) override {
+    (void)port_num;
+    (void)buffer;
+    (void)len;
+  }
 
   void start_() override {}
 
@@ -116,15 +122,15 @@ private:
 };
 
 class DevMgrTest : public ::testing::Test {
-public:
-
+ public:
   void port_status(DevMgrIface::port_t port_num,
                    const DevMgrIface::PortStatus status) {
+    (void)port_num;
     std::lock_guard<std::mutex> lock(cnt_mutex);
     cb_counts[status]++;
   }
 
-protected:
+ protected:
   DevMgrTest()
       : g_mgr(new TestDevMgrImp()) {
     g_mgr->start();
@@ -162,7 +168,7 @@ TEST_F(DevMgrTest, cb_test) {
 
   register_callback();
 
-  for (int i = 0; i < NPORTS; i++) {
+  for (unsigned int i = 0; i < NPORTS; i++) {
     g_mgr->port_add("dummyport", i, nullptr, nullptr);
   }
   std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -170,21 +176,21 @@ TEST_F(DevMgrTest, cb_test) {
       << "Port add callbacks incorrect" << std::endl;
   reset_counts();
 
-  for (int i = 0; i < NPORTS; i++) {
+  for (unsigned int i = 0; i < NPORTS; i++) {
     g_mgr->set_port_status(i, DevMgrIface::PortStatus::PORT_DOWN);
   }
   std::this_thread::sleep_for(std::chrono::seconds(2));
   ASSERT_EQ(NPORTS, get_count(DevMgrIface::PortStatus::PORT_DOWN))
       << "Port down callbacks incorrect" << std::endl;
 
-  for (int i = 0; i < NPORTS; i++) {
+  for (unsigned int i = 0; i < NPORTS; i++) {
     g_mgr->set_port_status(i, DevMgrIface::PortStatus::PORT_UP);
   }
   std::this_thread::sleep_for(std::chrono::seconds(2));
   ASSERT_EQ(NPORTS, get_count(DevMgrIface::PortStatus::PORT_UP))
       << "Port up callbacks incorrect" << std::endl;
 
-  for (int i = 0; i < NPORTS; i++) {
+  for (unsigned int i = 0; i < NPORTS; i++) {
     g_mgr->port_remove(i);
   }
   std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -203,7 +209,7 @@ class PacketInReceiver {
 
   void receive(int port_num, const char *buffer, int len, void *cookie) {
     (void) cookie;
-    if(len > max_size) return;
+    if (static_cast<size_t>(len) > max_size) return;
     std::unique_lock<std::mutex> lock(mutex);
     while (status != Status::CAN_RECEIVE) {
       can_receive.wait(lock);
@@ -217,11 +223,11 @@ class PacketInReceiver {
   bool read(char *dst, size_t len, int *recv_port,
             unsigned int timeout_ms = 1000) {
     len = (len > max_size) ? max_size : len;
-    typedef std::chrono::system_clock clock;
+    using clock = std::chrono::system_clock;
     clock::time_point tp_start = clock::now();
     clock::time_point tp_end = tp_start + std::chrono::milliseconds(timeout_ms);
     std::unique_lock<std::mutex> lock(mutex);
-    while(status != Status::CAN_READ) {
+    while (status != Status::CAN_READ) {
       if (clock::now() > tp_end)
         return false;
       can_read.wait_until(lock, tp_end);
@@ -249,13 +255,14 @@ class PacketInReceiver {
   mutable std::condition_variable can_read{};
 };
 
+#ifdef BMNANOMSG_ON
+
 // is here because DevMgr has a protected destructor
-class PacketInSwitch : public DevMgr {
-};
+class PacketInSwitch : public DevMgr { };
 
 class PacketInDevMgrTest : public ::testing::Test {
  protected:
-  static constexpr size_t max_buffer_size = 512;
+  static constexpr size_t kMaxBufferSize = 512;
 
   PacketInDevMgrTest()
       : packet_inject(addr) { }
@@ -287,7 +294,7 @@ class PacketInDevMgrTest : public ::testing::Test {
   bool check_recv(PacketInReceiver *receiver,
                   int send_port, const char *send_buffer, size_t size,
                   unsigned int timeout_ms = 1000) {
-    char recv_buffer[max_buffer_size];
+    char recv_buffer[kMaxBufferSize];
     memset(recv_buffer, 0, sizeof(recv_buffer));
     if (size > sizeof(recv_buffer)) return false;
     int recv_port = -1;
@@ -299,8 +306,8 @@ class PacketInDevMgrTest : public ::testing::Test {
 
   const std::string addr = "ipc:///tmp/test_packet_in_abc123";
 
-  PacketInReceiver recv_switch{max_buffer_size};
-  PacketInReceiver recv_lib{max_buffer_size};
+  PacketInReceiver recv_switch{kMaxBufferSize};
+  PacketInReceiver recv_lib{kMaxBufferSize};
 
   PacketInSwitch sw;
 
@@ -322,9 +329,18 @@ TEST_F(PacketInDevMgrTest, PacketInTest) {
   ASSERT_TRUE(check_recv(&recv_switch, port, pkt, sizeof(pkt)));
 }
 
+TEST_F(PacketInDevMgrTest, InfoRequestTest) {
+  constexpr int port = 2;
+  // using info_type 0 and 1, but can be any integer value at the moment
+  // we expect a return value of 1 (error) as bmv2 does not support any request
+  // type
+  std::string rep_v;
+  ASSERT_EQ(1, packet_inject.request_info(port, 0, &rep_v));
+  ASSERT_EQ(1, packet_inject.request_info(port, 1, &rep_v));
+}
+
 class PacketInDevMgrPortStatusTest : public PacketInDevMgrTest {
  protected:
-
   PacketInDevMgrPortStatusTest() { }
 
   virtual void SetUp() {
@@ -337,6 +353,7 @@ class PacketInDevMgrPortStatusTest : public PacketInDevMgrTest {
 
   void port_status(DevMgrIface::port_t port_num,
                    const DevMgrIface::PortStatus status) {
+    (void)port_num;
     std::lock_guard<std::mutex> lock(cnt_mutex);
     cb_counts[status]++;
   }
@@ -428,6 +445,8 @@ TEST_F(PacketInDevMgrPortStatusTest, Status) {
   check_and_reset_counts(0u, 1u, 0u, 0u);
 }
 
+#endif  // BMNANOMSG_ON
+
 struct PMActive { };
 struct PMPassive { };
 
@@ -435,8 +454,8 @@ struct PMPassive { };
 template <typename PMType>
 class PortMonitorTest : public ::testing::Test {
  protected:
-  typedef DevMgrIface::port_t port_t;
-  typedef DevMgrIface::PortStatus PortStatus;
+  using port_t = DevMgrIface::port_t;
+  using PortStatus = DevMgrIface::PortStatus;
 
   static constexpr int device_id = 0;
 
@@ -492,6 +511,7 @@ PortMonitorTest<PMActive>::make_monitor() {
 template<>
 bool
 PortMonitorTest<PMPassive>::port_is_up(port_t port) {
+  (void)port;
   assert(0);
   return false;
 }
@@ -525,7 +545,7 @@ PortMonitorTest<PMActive>::set_port_status(port_t port, PortStatus status) {
   }
 }
 
-typedef Types<PMPassive, PMActive> PMTypes;
+using PMTypes = Types<PMPassive, PMActive>;
 
 TYPED_TEST_CASE(PortMonitorTest, PMTypes);
 

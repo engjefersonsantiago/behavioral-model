@@ -23,9 +23,13 @@
 
 namespace bm {
 
-typedef int header_id_t;
+using header_id_t = int;
+using header_stack_id_t = int;
+using header_union_id_t = int;
+using header_union_stack_id_t = int;
 
 class PHV;
+class PHVFactory;
 class Header;
 class Field;
 

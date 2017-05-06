@@ -24,6 +24,7 @@
 #include <bm/bm_sim/logger.h>
 #include <bm/bm_sim/debugger.h>
 #include <bm/bm_sim/event_logger.h>
+#include <bm/bm_sim/packet.h>
 
 #include <cassert>
 #include <fstream>
@@ -38,9 +39,9 @@ namespace bm {
 
 static void
 packet_handler(int port_num, const char *buffer, int len, void *cookie) {
-  // static_cast<Switch *> if okay here because cookie was obtained by casting a
-  // Switch * to void *
-  static_cast<Switch *>(cookie)->receive(port_num, buffer, len);
+  // static_cast<SwitchWContexts *> if okay here because cookie was obtained by
+  // casting a SwitchWContexts * to void *
+  static_cast<SwitchWContexts *>(cookie)->receive(port_num, buffer, len);
 }
 
 // TODO(antonin): maybe a factory method would be more appropriate for Switch
@@ -54,6 +55,29 @@ SwitchWContexts::SwitchWContexts(size_t nb_cxts, bool enable_swap)
 }
 
 LookupStructureFactory SwitchWContexts::default_lookup_factory {};
+
+int
+SwitchWContexts::receive(int port_num, const char *buffer, int len) {
+  if (dump_packet_data > 0) {
+    Logger::get()->info("Received packet of length {} on port {}: {}",
+                        len, port_num, sample_packet_data(buffer, len));
+  }
+  return receive_(port_num, buffer, len);
+}
+
+void
+SwitchWContexts::start_and_return() {
+  {
+    std::unique_lock<std::mutex> config_lock(config_mutex);
+    config_loaded_cv.wait(config_lock, [this]() { return config_loaded; });
+  }
+  start_and_return_();
+}
+
+void
+SwitchWContexts::reset_target_state() {
+  reset_target_state_();
+}
 
 std::string
 SwitchWContexts::get_debugger_addr() const {
@@ -97,13 +121,9 @@ SwitchWContexts::force_arith_header(const std::string &header_name) {
 }
 
 int
-SwitchWContexts::init_objects(const std::string &json_path, int dev_id,
+SwitchWContexts::init_objects(std::istream *is, int dev_id,
                               std::shared_ptr<TransportIface> transport) {
-  std::ifstream fs(json_path, std::ios::in);
-  if (!fs) {
-    std::cout << "JSON input file " << json_path << " cannot be opened\n";
-    return 1;
-  }
+  int status = 0;
 
   device_id = dev_id;
 
@@ -118,32 +138,68 @@ SwitchWContexts::init_objects(const std::string &json_path, int dev_id,
     auto &cxt = contexts.at(cxt_id);
     cxt.set_device_id(device_id);
     cxt.set_notifications_transport(notifications_transport);
-    int status = cxt.init_objects(&fs, get_lookup_factory(),
-                                  required_fields, arith_objects);
-    fs.clear();
-    fs.seekg(0, std::ios::beg);
-    if (status != 0) return status;
+    if (is != nullptr) {
+      status = cxt.init_objects(is, get_lookup_factory(),
+                                required_fields, arith_objects);
+      is->clear();
+      is->seekg(0, std::ios::beg);
+      if (status != 0) return status;
+    }
     phv_source->set_phv_factory(cxt_id, &cxt.get_phv_factory());
-  }
-
-  {
-    std::unique_lock<std::mutex> config_lock(config_mutex);
-    current_config = std::string((std::istreambuf_iterator<char>(fs)),
-                                 std::istreambuf_iterator<char>());
   }
 
   return 0;
 }
 
 int
-SwitchWContexts::init_from_command_line_options(int argc, char *argv[],
-                                                TargetParserIface *tp) {
+SwitchWContexts::init_objects(const std::string &json_path, int dev_id,
+                              std::shared_ptr<TransportIface> transport) {
+  std::ifstream fs(json_path, std::ios::in);
+  if (!fs) {
+    std::cout << "JSON input file " << json_path << " cannot be opened\n";
+    return 1;
+  }
+
+  int status = init_objects(&fs, dev_id, transport);
+  if (status != 0) return status;
+
+  {
+    std::unique_lock<std::mutex> config_lock(config_mutex);
+    current_config = std::string((std::istreambuf_iterator<char>(fs)),
+                                 std::istreambuf_iterator<char>());
+    config_loaded = true;
+  }
+
+  return 0;
+}
+
+int
+SwitchWContexts::init_objects_empty(int dev_id,
+                                    std::shared_ptr<TransportIface> transport) {
+  return init_objects(nullptr, dev_id, transport);
+}
+
+int
+SwitchWContexts::init_from_command_line_options(
+    int argc, char *argv[], TargetParserIface *tp,
+    std::shared_ptr<TransportIface> my_transport,
+    std::unique_ptr<DevMgrIface> my_dev_mgr) {
+  int status = 0;
   OptionsParser parser;
   parser.parse(argc, argv, tp);
 
-  notifications_addr = parser.notifications_addr;
-  auto transport = std::shared_ptr<TransportIface>(
-      TransportIface::make_nanomsg(notifications_addr));
+  auto transport = my_transport;
+  if (transport == nullptr) {
+#ifdef BMNANOMSG_ON
+    notifications_addr = parser.notifications_addr;
+    transport = std::shared_ptr<TransportIface>(
+        TransportIface::make_nanomsg(notifications_addr));
+#else
+    notifications_addr = "";
+    transport = std::shared_ptr<TransportIface>(TransportIface::make_dummy());
+#endif
+  }
+  // won't hurt if transport has already been opened
   transport->open();
 
 #ifdef BMDEBUG_ON
@@ -165,14 +221,20 @@ SwitchWContexts::init_from_command_line_options(int argc, char *argv[],
 
   Logger::set_log_level(parser.log_level);
 
-  int status = init_objects(parser.config_file_path, parser.device_id,
-                            transport);
+  if (parser.no_p4)
+    status = init_objects_empty(parser.device_id, transport);
+  else
+    status = init_objects(parser.config_file_path, parser.device_id, transport);
   if (status != 0) return status;
 
-  if (parser.use_files)
+  if (my_dev_mgr != nullptr)
+    set_dev_mgr(std::move(my_dev_mgr));
+  else if (parser.use_files)
     set_dev_mgr_files(parser.wait_time);
+#ifdef BMNANOMSG_ON
   else if (parser.packet_in)
     set_dev_mgr_packet_in(device_id, parser.packet_in_addr, transport);
+#endif
   else
     set_dev_mgr_bmi(device_id, transport);
 
@@ -207,6 +269,8 @@ SwitchWContexts::init_from_command_line_options(int argc, char *argv[],
     status = deserialize_from_file(parser.state_file_path);
     if (status != 0) return status;
   }
+
+  dump_packet_data = parser.dump_packet_data;
 
   // TODO(unknown): is this the right place to do this?
   set_packet_handler(packet_handler, static_cast<void *>(this));
@@ -250,6 +314,12 @@ SwitchWContexts::swap_configs() {
     ErrorCode rc = cxt.swap_configs();
     if (rc != ErrorCode::SUCCESS) return rc;
   }
+  {
+    std::unique_lock<std::mutex> config_lock(config_mutex);
+    if (!config_loaded) config_loaded = true;
+    assert(do_swap() == 0);
+  }
+  config_loaded_cv.notify_one();
   return ErrorCode::SUCCESS;
 }
 
@@ -341,7 +411,9 @@ SwitchWContexts::do_swap() {
       phv_source->set_phv_factory(cxt_id, &cxt.get_phv_factory());
     rc &= swap_done;
   }
+#ifdef BMDEBUG_ON
   Debugger::get()->config_change();
+#endif
   BMELOG(config_change);
   return rc;
 }
@@ -384,9 +456,62 @@ SwitchWContexts::set_crc32_custom_parameters(
       calc_name, crc32_config);
 }
 
+std::unique_ptr<Packet>
+SwitchWContexts::new_packet_ptr(size_t cxt_id, int ingress_port,
+                                packet_id_t id, int ingress_length,
+                                // NOLINTNEXTLINE(whitespace/operators)
+                                PacketBuffer &&buffer) {
+  boost::shared_lock<boost::shared_mutex> lock(ongoing_swap_mutex);
+  return std::unique_ptr<Packet>(new Packet(
+      cxt_id, ingress_port, id, 0u, ingress_length, std::move(buffer),
+      phv_source.get()));
+}
+
+Packet
+SwitchWContexts::new_packet(size_t cxt_id, int ingress_port, packet_id_t id,
+                            // NOLINTNEXTLINE(whitespace/operators)
+                            int ingress_length, PacketBuffer &&buffer) {
+  boost::shared_lock<boost::shared_mutex> lock(ongoing_swap_mutex);
+  return Packet(cxt_id, ingress_port, id, 0u, ingress_length,
+                std::move(buffer), phv_source.get());
+}
+
+int
+SwitchWContexts::transport_send_probe(uint64_t x) const {
+  struct msg_t {
+    char sub_topic[4];
+    int switch_id;
+    uint64_t x;
+    char _padding[16];  // the header size for notifications is always 32 bytes
+  } __attribute__((packed));
+  msg_t msg;
+  char *msg_ = reinterpret_cast<char *>(&msg);
+  memset(msg_, 0, sizeof(msg));
+  memcpy(msg_, "TST|", 4);
+  msg.switch_id = device_id;
+  msg.x = x;
+  return notifications_transport->send(msg_, static_cast<int>(sizeof(msg)));
+}
+
 // Switch convenience class
 
 Switch::Switch(bool enable_swap)
     : SwitchWContexts(1u, enable_swap) { }
+
+std::unique_ptr<Packet>
+Switch::new_packet_ptr(int ingress_port,
+                       packet_id_t id, int ingress_length,
+                       // NOLINTNEXTLINE(whitespace/operators)
+                       PacketBuffer &&buffer) {
+  return new_packet_ptr(0u, ingress_port, id, ingress_length,
+                        std::move(buffer));
+}
+
+Packet
+Switch::new_packet(int ingress_port, packet_id_t id, int ingress_length,
+                   // NOLINTNEXTLINE(whitespace/operators)
+                   PacketBuffer &&buffer) {
+  return new_packet(0u, ingress_port, id, ingress_length, std::move(buffer));
+}
 
 }  // namespace bm

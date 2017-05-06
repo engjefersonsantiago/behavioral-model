@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-/* P4 compatible extern type for ROHC header compression 
+/* P4 compatible extern type for ROHC header compression
  * Jeferson Santiago da Silva (eng.jefersonsantiago@gmail.com)
  */
 
@@ -53,12 +53,11 @@ class ExternRohcCompressor : public ExternType {
 
   // External ROHC compressor entity
   void rohc_comp_header () {
-    std::chrono::high_resolution_clock::time_point t1 =
-        std::chrono::high_resolution_clock::now();
+    auto t1 = std::chrono::high_resolution_clock::now();
 
     PHV* phv = get_packet().get_phv();
     size_t uncomp_headers_size = 0;
-    size_t first_header_size = 	 0;
+    size_t first_header_size =	 0;
 
     // Get the headers to compress skipping the first one
     std::vector<Header*> uncomp_headers;
@@ -66,13 +65,13 @@ class ExternRohcCompressor : public ExternType {
     for (auto it = phv->header_begin(); it != phv->header_end(); ++it) {
       const Header &header = *it;
       if (header.is_valid() && !header.is_metadata()) {
-      	if(!first_header) {
-          uncomp_headers_size += header.get_nbytes_packet();			
+		if(!first_header) {
+          uncomp_headers_size += header.get_nbytes_packet();
           uncomp_headers.push_back((Header*) &header);
         }
-        else {  
+        else {
           first_header = false;
-          first_header_size = header.get_nbytes_packet();		
+          first_header_size = header.get_nbytes_packet();
         }
       }
     }
@@ -84,14 +83,18 @@ class ExternRohcCompressor : public ExternType {
     unsigned char *comp_buff = new unsigned char [uncomp_headers_size
                                                   + payload_size + 2];
 
-    // Initialize the compression data structures 
+	//printf("Packet size: %u\n", phv->get_field("standard_metadata.packet_length").get_uint());
+
+
+    // Initialize the compression data structures
     int index_comp_buff = 0;
     for(auto h : uncomp_headers) {
-      for (size_t f = 0; f < h->size(); ++f) {
-    	  const char* data = h->get_field(f).get_bytes().data();
-  	    for (int i = 0; i < (int) h->get_field(f).get_bytes().size(); ++i) {
-  	      uncomp_buff[index_comp_buff] = *data;
-  	      ++index_comp_buff;
+      for (size_t f = 0; f < h->size() - 1; f++) {
+	    const char* data = h->get_field(f).get_bytes().data();
+	    for (int i = 0; i < (int) h->get_field(f).get_bytes().size(); i++) {
+	      //printf("i: %i, f: %lu, index: %d\n", i, f, index_comp_buff);
+		  uncomp_buff[index_comp_buff] = *data;
+	      ++index_comp_buff;
           ++data;
         }
       }
@@ -99,11 +102,22 @@ class ExternRohcCompressor : public ExternType {
       h->mark_invalid();
     }
 
+	//printf("----------------------------\n");
+	//printf("Packet buffer contains %lu bytes\n", get_packet().get_data_size());
+	//printf("----------------------------\n");
+	//char *data = get_packet().data();
+	//for (size_t i = 0; i < get_packet().get_data_size(); i++) {
+	//	if (i%8 == 0) printf("\n");
+	//	printf("0x%.2x ", (unsigned char)*data);
+	//	data++;
+	//}
+	//printf("\n----------------------------\n");
+
     // Perform the header decompression
     rohc_c_ent.compress_header(
         comp_buff,
         uncomp_buff,
-        &comp_header_size, 
+        &comp_header_size,
         (size_t) uncomp_headers_size + payload_size);
 
     comp_header_size -= payload_size;
@@ -116,8 +130,7 @@ class ExternRohcCompressor : public ExternType {
       payload_start[i] = comp_buff[i];
     }
 
-    std::chrono::high_resolution_clock::time_point t2 = 
-        std::chrono::high_resolution_clock::now();
+    auto t2 = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>
         (t2 - t1).count();
     cout << "Compression execution time: " << duration << " useconds\n";
@@ -126,11 +139,11 @@ class ExternRohcCompressor : public ExternType {
 
   // Default constructor/destructor
   virtual ~ExternRohcCompressor () {}
-  
+
  private:
   // declared attributes
   Data verbose{DEBUG_MODE};
-  
+
   // Stateful parameters
   bool dbg_en{true};
   RohcCompressorEntity rohc_c_ent;

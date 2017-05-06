@@ -22,12 +22,21 @@
 #include <bm/bm_sim/debugger.h>
 #include <bm/bm_sim/event_logger.h>
 #include <bm/bm_sim/P4Objects.h>
+#include <bm/bm_sim/packet.h>
 
+#include <iostream>
 #include <string>
+#include <vector>
 
 #include "utils.h"
 
 namespace bm {
+
+ActionEngineState::ActionEngineState(Packet *pkt,
+                                     const ActionData &action_data,
+                                     const std::vector<Data> &const_values)
+    : pkt(*pkt), phv(*pkt->get_phv()),
+      action_data(action_data), const_values(const_values) { }
 
 // the first tmp data register is reserved for internal engine use (register
 // index evaluation)
@@ -54,6 +63,32 @@ ActionFn::parameter_push_back_header_stack(header_stack_id_t header_stack) {
   ActionParam param;
   param.tag = ActionParam::HEADER_STACK;
   param.header_stack = header_stack;
+  params.push_back(param);
+}
+
+void
+ActionFn::parameter_push_back_last_header_stack_field(
+    header_stack_id_t header_stack, int field_offset) {
+  ActionParam param;
+  param.tag = ActionParam::LAST_HEADER_STACK_FIELD;
+  param.stack_field = {header_stack, field_offset};
+  params.push_back(param);
+}
+
+void
+ActionFn::parameter_push_back_header_union(header_union_id_t header_union) {
+  ActionParam param;
+  param.tag = ActionParam::HEADER_UNION;
+  param.header_union = header_union;
+  params.push_back(param);
+}
+
+void
+ActionFn::parameter_push_back_header_union_stack(
+    header_union_stack_id_t header_union_stack) {
+  ActionParam param;
+  param.tag = ActionParam::HEADER_UNION_STACK;
+  param.header_union_stack = header_union_stack;
   params.push_back(param);
 }
 
@@ -141,7 +176,7 @@ ActionFn::parameter_push_back_expression(
   std::unique_ptr<ArithExpression> expr
 ) {
   size_t nb_expression_params = 1;
-  for (const ActionParam &p : params)
+  for (const auto &p : params)
     if (p.tag == ActionParam::EXPRESSION) nb_expression_params += 1;
 
   assert(nb_expression_params <= ActionFn::nb_data_tmps);
@@ -167,25 +202,63 @@ ActionFn::parameter_push_back_extern_instance(ExternType *extern_instance) {
 }
 
 void
+ActionFn::parameter_push_back_string(const std::string &str) {
+  strings.push_back(str);
+  size_t idx = 0;
+  // we called push_back on the vector which may have invalidated the pointers,
+  // so we need to recompute them; alternatively we could add a level of
+  // indirection and store std::unique_ptr<std::string> in strings...
+  for (auto &p : params)
+    if (p.tag == ActionParam::STRING) p.str = &strings.at(idx++);
+  assert(strings.size() - 1 == idx);
+  ActionParam param;
+  param.tag = ActionParam::STRING;
+  param.str = &strings.back();
+  params.push_back(param);
+}
+
+void
 ActionFn::push_back_primitive(ActionPrimitive_ *primitive) {
   primitives.push_back(primitive);
 }
 
+void
+ActionFn::grab_register_accesses(RegisterSync *rs) const {
+  rs->merge_from(register_sync);
+}
+
+size_t
+ActionFn::get_num_params() const {
+  return num_params;
+}
+
+namespace core {
+
+extern int _bm_core_primitives_import();
+
+}  // namespace core
+
+ActionOpcodesMap::ActionOpcodesMap() {
+  // ensures that core primitives are registered properly
+  core::_bm_core_primitives_import();
+}
 
 bool
 ActionOpcodesMap::register_primitive(
     const char *name,
-    std::unique_ptr<ActionPrimitive_> primitive) {
+    ActionPrimitiveFactoryFn fn) {
   const std::string str_name = std::string(name);
   auto it = map_.find(str_name);
   if (it != map_.end()) return false;
-  map_[str_name] = std::move(primitive);
+  map_[str_name] = std::move(fn);
   return true;
 }
 
-ActionPrimitive_ *
+std::unique_ptr<ActionPrimitive_>
 ActionOpcodesMap::get_primitive(const std::string &name) {
-  return map_[name].get();
+  auto it = map_.find(name);
+  if (it == map_.end()) return nullptr;
+  return it->second();
 }
 
 ActionOpcodesMap *
@@ -210,6 +283,19 @@ ActionFnEntry::push_back_action_data(const char *bytes, int nbytes) {
 }
 
 void
+ActionFnEntry::execute(Packet *pkt) const {
+  ActionEngineState state(pkt, action_data, action_fn->const_values);
+
+  auto &primitives = action_fn->primitives;
+  size_t param_offset = 0;
+  // primitives is a vector of pointers
+  for (auto primitive : primitives) {
+    primitive->execute(&state, &(action_fn->params[param_offset]));
+    param_offset += primitive->get_num_params();
+  }
+}
+
+void
 ActionFnEntry::operator()(Packet *pkt) const {
   if (!action_fn) return;  // empty action
   BMELOG(action_execute, *pkt, *action_fn, action_data);
@@ -218,19 +304,11 @@ ActionFnEntry::operator()(Packet *pkt) const {
   DEBUGGER_NOTIFY_CTR(
       Debugger::PacketId::make(pkt->get_packet_id(), pkt->get_copy_id()),
       DBG_CTR_ACTION | action_fn->get_id());
-  ActionEngineState state(pkt, action_data, action_fn->const_values);
 
   {
     RegisterSync::RegisterLocks RL;
     action_fn->register_sync.lock(&RL);
-
-    auto &primitives = action_fn->primitives;
-    size_t param_offset = 0;
-    // primitives is a vector of pointers
-    for (auto primitive : primitives) {
-      primitive->execute(&state, &(action_fn->params[param_offset]));
-      param_offset += primitive->get_num_params();
-    }
+    execute(pkt);
   }
 
   DEBUGGER_NOTIFY_CTR(

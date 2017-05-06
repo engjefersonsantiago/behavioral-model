@@ -19,10 +19,17 @@
  */
 
 #include <bm/bm_sim/actions.h>
+#include <bm/bm_sim/calculations.h>
+#include <bm/bm_sim/core/primitives.h>
+#include <bm/bm_sim/counters.h>
+#include <bm/bm_sim/meters.h>
+#include <bm/bm_sim/packet.h>
+#include <bm/bm_sim/phv.h>
 #include <rohc/rohc_compressor_module.h>
 #include <rohc/rohc_decompressor_module.h>
 
 #include <random>
+#include <thread>
 
 template <typename... Args>
 using ActionPrimitive = bm::ActionPrimitive<Args...>;
@@ -45,7 +52,7 @@ RohcCompressorEntity rohc_c_ent(true, false);
 
 class modify_field : public ActionPrimitive<Data &, const Data &> {
   void operator ()(Data &dst, const Data &src) {
-    dst.set(src);
+    bm::core::assign()(dst, src);
   }
 };
 
@@ -144,7 +151,7 @@ REGISTER_PRIMITIVE(shift_right);
 class drop : public ActionPrimitive<> {
   void operator ()() {
     get_field("standard_metadata.egress_spec").set(511);
-    if (get_phv().has_header("intrinsic_metadata")) {
+    if (get_phv().has_field("intrinsic_metadata.mcast_grp")) {
       get_field("intrinsic_metadata.mcast_grp").set(0);
     }
   }
@@ -208,15 +215,7 @@ REGISTER_PRIMITIVE(remove_header);
 
 class copy_header : public ActionPrimitive<Header &, const Header &> {
   void operator ()(Header &dst, const Header &src) {
-    if (!src.is_valid()) {
-      dst.mark_invalid();
-      return;
-    }
-    dst.mark_valid();
-    assert(dst.get_header_type_id() == src.get_header_type_id());
-    for (unsigned int i = 0; i < dst.size(); i++) {
-      dst[i].set(src[i]);
-    }
+    bm::core::assign_header()(dst, src);
   }
 };
 
@@ -323,22 +322,6 @@ class register_write
 };
 
 REGISTER_PRIMITIVE(register_write);
-
-class push : public ActionPrimitive<HeaderStack &, const Data &> {
-  void operator ()(HeaderStack &stack, const Data &num) {
-    stack.push_front(num.get_uint());
-  }
-};
-
-REGISTER_PRIMITIVE(push);
-
-class pop : public ActionPrimitive<HeaderStack &, const Data &> {
-  void operator ()(HeaderStack &stack, const Data &num) {
-    stack.pop_front(num.get_uint());
-  }
-};
-
-REGISTER_PRIMITIVE(pop);
 
 // I cannot name this "truncate" and register it with the usual
 // REGISTER_PRIMITIVE macro, because of a name conflict:

@@ -93,11 +93,15 @@ OptionsParser::parse(int argc, char *argv[], TargetParserIface *tp) {
        "(interface X corresponds to two files X_in.pcap and X_out.pcap).  "
        "Argument is the time to wait (in seconds) before starting to process "
        "the packet files.")
+#ifdef BMNANOMSG_ON
       ("packet-in", po::value<std::string>(),
        "Enable receiving packet on this (nanomsg) socket. "
        "The --interface options will be ignored.")
+#endif
+#ifdef BMTHRIFT_ON
       ("thrift-port", po::value<int>(),
        "TCP port on which to run the Thrift runtime server")
+#endif
       ("device-id", po::value<int>(),
        "Device ID, used to identify the device in IPC messages (default 0)")
       ("nanolog", po::value<std::string>(),
@@ -109,13 +113,15 @@ OptionsParser::parse(int argc, char *argv[], TargetParserIface *tp) {
        "Enable logging to given file")
       ("log-level,L", po::value<std::string>(),
        "Set log level, supported values are "
-       "'trace', 'debug', 'info', 'warn', 'error', off'")
+       "'trace', 'debug', 'info', 'warn', 'error', off'; default is 'trace'")
       ("log-flush", "If used with '--log-file', the logger will flush to disk "
        "after every log message")
+#ifdef BMNANOMSG_ON
       ("notifications-addr", po::value<std::string>(),
        "Specify the nanomsg address to use for notifications "
        "(e.g. learning, ageing, ...); "
        "default is ipc:///tmp/bmv2-<device-id>-notifications.ipc")
+#endif
 #ifdef BMDEBUG_ON
       ("debugger", "Activate debugger")
       ("debugger-addr", po::value<std::string>(),
@@ -125,7 +131,13 @@ OptionsParser::parse(int argc, char *argv[], TargetParserIface *tp) {
 #endif
       ("restore-state", po::value<std::string>(),
        "Restore state from file")
+      ("dump-packet-data", po::value<size_t>(),
+       "Specify how many bytes of packet data to dump upon receiving & sending "
+       "a packet. We use the logger to dump the packet data, with log level "
+       "'info', so make sure the log level you have set does not exclude "
+       "'info' messages; default is 0, which means that nothing is logged.")
       ("version,v", "Display version information")
+      ("no-p4", "Enable the switch to start without an inout configuration")
       ;  // NOLINT(whitespace/semicolon)
 
   po::options_description hidden;
@@ -183,24 +195,43 @@ OptionsParser::parse(int argc, char *argv[], TargetParserIface *tp) {
     exit(0);
   }
 
-  if (!vm.count("input-config")) {
+  no_p4 = vm.count("no-p4");
+  if (!no_p4 && !vm.count("input-config")) {
     std::cout << "Error: please specify an input JSON configuration file\n";
     std::cout << "Usage: SWITCH_NAME [options] <path to JSON config file>\n";
     std::cout << description;
     exit(1);
   }
+  // this is a little hacky because we are mixing positional arguments; ideally
+  // the input config would be just a regular option
+  if (no_p4 && vm.count("input-config")) {
+    auto path = vm["input-config"].as<std::string>();
+    auto is_pos = (path.size() > 2 && path.substr(0, 2) != "--");
+    auto dot = path.find_last_of(".");
+    auto has_json_extension =
+        (dot != std::string::npos && path.substr(dot) == ".json");
+    if (tp && (!is_pos || !has_json_extension)) {
+      to_pass_further.insert(to_pass_further.begin(), path);
+    } else {
+      std::cout << "Warning: ignoring input config as '--no-p4' was used\n";
+    }
+  }
+  if (!no_p4 && vm.count("input-config"))
+    config_file_path = vm["input-config"].as<std::string>();
 
   device_id = 0;
   if (vm.count("device-id")) {
     device_id = vm["device-id"].as<int>();
   }
 
+#ifdef BMNANOMSG_ON
   if (vm.count("notifications-addr")) {
     notifications_addr = vm["notifications-addr"].as<std::string>();
   } else {
     notifications_addr = std::string("ipc:///tmp/bmv2-")
         + std::to_string(device_id) + std::string("-notifications.ipc");
   }
+#endif
 
   if (vm.count("nanolog")) {
 #ifndef BMELOG_ON
@@ -245,12 +276,37 @@ OptionsParser::parse(int argc, char *argv[], TargetParserIface *tp) {
     log_level = levels_map[log_level_str];
   }
 
+  auto log_requested = console_logging || !file_logger.empty();
+  auto missing_macros = false;
+#ifndef BMLOG_TRACE_ON
+  missing_macros |= log_level <= Logger::LogLevel::TRACE;
+#endif
+#ifndef BMLOG_DEBUG_ON
+  missing_macros |= log_level <= Logger::LogLevel::DEBUG;
+#endif
+  if (log_requested && missing_macros) {
+    std::cout << "You disabled logging macros when building this binary; "
+              << "however, the log level is currenty set to include 'debug' "
+              << "and possibly 'trace' messages; therefore the logs will be "
+              << "missing most messages\n";
+  }
+
   if (vm.count("log-flush")) {
     if (!vm.count("log-file")) {
       std::cout << "Ignoring --log-flush option because --log-file "
                 << "not specified\n";
     } else {
       log_flush = true;
+    }
+  }
+
+  if (vm.count("dump-packet-data")) {
+    dump_packet_data = vm["dump-packet-data"].as<size_t>();
+    if (dump_packet_data > 0 && log_level > Logger::LogLevel::INFO) {
+      std::cout << "You asked for some packet data to be dumped for each "
+                << "packet on ingress and egress, but you set a log level "
+                << "which excludes 'info' messages. Therefore, "
+                << "'--dump-packet-data' will be ignored.\n";
     }
   }
 
@@ -271,12 +327,14 @@ OptionsParser::parse(int argc, char *argv[], TargetParserIface *tp) {
       wait_time = 0;
   }
 
+#ifdef BMNANOMSG_ON
   if (vm.count("packet-in")) {
     packet_in = true;
     packet_in_addr = vm["packet-in"].as<std::string>();
     // very important to clear interface list
     ifaces.clear();
   }
+#endif
 
   if (use_files && packet_in) {
     std::cout << "Error: --use-files and --packet-in are exclusive\n";
@@ -292,9 +350,7 @@ OptionsParser::parse(int argc, char *argv[], TargetParserIface *tp) {
         + std::to_string(device_id) + std::string("-debug.ipc");
   }
 
-  assert(vm.count("input-config"));
-  config_file_path = vm["input-config"].as<std::string>();
-
+#ifdef BMTHRIFT_ON
   int default_thrift_port = 9090;
   if (vm.count("thrift-port")) {
     thrift_port = vm["thrift-port"].as<int>();
@@ -304,6 +360,7 @@ OptionsParser::parse(int argc, char *argv[], TargetParserIface *tp) {
               << std::endl;
     thrift_port = default_thrift_port;
   }
+#endif
 
   if (vm.count("restore-state")) {
     state_file_path = vm["restore-state"].as<std::string>();

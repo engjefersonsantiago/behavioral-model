@@ -20,10 +20,12 @@
 
 #include <gtest/gtest.h>
 
+#include <bm/bm_sim/packet.h>
+#include <bm/bm_sim/phv.h>
+#include <bm/bm_sim/phv_source.h>
+
 #include <vector>
 #include <memory>
-
-#include <bm/bm_sim/packet.h>
 
 using namespace bm;
 
@@ -73,6 +75,7 @@ class PHVSourceTest : public PHVSourceIface {
   }
 
   size_t phvs_in_use_(size_t cxt) override {
+    (void)cxt;
     return count;
   }
 

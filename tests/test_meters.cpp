@@ -20,10 +20,14 @@
 
 #include <gtest/gtest.h>
 
+#include <bm/bm_sim/meters.h>
+#include <bm/bm_sim/packet.h>
+#include <bm/bm_sim/phv.h>
+#include <bm/bm_sim/phv_source.h>
+
 #include <thread>
 #include <chrono>
-
-#include <bm/bm_sim/meters.h>
+#include <vector>
 
 using namespace bm;
 
@@ -35,9 +39,9 @@ using std::this_thread::sleep_until;
 // Google Test fixture for meters tests
 class MetersTest : public ::testing::Test {
  protected:
-  typedef std::chrono::high_resolution_clock clock;
-  typedef Meter::MeterType MeterType;
-  typedef Meter::color_t color_t;
+  using clock = std::chrono::high_resolution_clock;
+  using MeterType = Meter::MeterType;
+  using color_t = Meter::color_t;
 
  protected:
   PHVFactory phv_factory;
@@ -83,13 +87,13 @@ TEST_F(MetersTest, trTCM) {
   clock::time_point next_stop = clock::now();
 
   color_t color;
-  for(size_t i = 0; i < 9; i++) {
+  for (size_t i = 0; i < 9; i++) {
     color = meter.execute(pkt);
     output.push_back(color);
     next_stop += milliseconds(90);
     sleep_until(next_stop);
   }
-  for(size_t i = 0; i < 3; i++) {
+  for (size_t i = 0; i < 3; i++) {
     color = meter.execute(pkt);
     output.push_back(color);
     next_stop += milliseconds(10);
@@ -170,4 +174,20 @@ TEST_F(MetersTest, GetRates) {
     ASSERT_EQ(rates[i].info_rate, retrieved_rates[i].info_rate);
     ASSERT_EQ(rates[i].burst_size, retrieved_rates[i].burst_size);
   }
+}
+
+TEST_F(MetersTest, PreColor) {
+  const color_t GREEN = 0;
+  const color_t RED = 1;
+
+  Meter meter(MeterType::PACKETS, 1);
+  // 2 packets per second, burst size of 3
+  Meter::rate_config_t rate = {0.000002, 3};
+  meter.set_rates({rate});
+
+  Packet pkt = get_pkt(128);
+
+  ASSERT_EQ(GREEN, meter.execute(pkt));
+  ASSERT_EQ(RED, meter.execute(pkt, RED));
+  ASSERT_EQ(GREEN, meter.execute(pkt));
 }

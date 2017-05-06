@@ -21,8 +21,7 @@
 #ifndef BM_BM_SIM_P4OBJECTS_H_
 #define BM_BM_SIM_P4OBJECTS_H_
 
-#include <istream>
-#include <ostream>
+#include <iosfwd>
 #include <vector>
 #include <unordered_map>
 #include <string>
@@ -33,11 +32,12 @@
 
 #include "tables.h"
 #include "headers.h"
-#include "phv.h"
+#include "phv_forward.h"
 #include "parser.h"
 #include "deparser.h"
 #include "pipeline.h"
 #include "conditionals.h"
+#include "checksums.h"
 #include "control_flow.h"
 #include "learning.h"
 #include "meters.h"
@@ -46,6 +46,7 @@
 #include "ageing.h"
 #include "field_lists.h"
 #include "extern.h"
+#include "enums.h"
 
 // forward declaration of Json::Value
 namespace Json {
@@ -56,9 +57,11 @@ class Value;
 
 namespace bm {
 
+using ConfigOptionMap = std::unordered_map<std::string, std::string>;
+
 class P4Objects {
  public:
-  typedef std::pair<std::string, std::string> header_field_pair;
+  using header_field_pair = std::pair<std::string, std::string>;
 
   class ForceArith {
     friend class P4Objects;
@@ -78,14 +81,17 @@ class P4Objects {
     std::set<std::string> headers;
   };
 
+  enum class ExprType;  // forward declaration
+
  public:
   // A reference works great here, but should I switch to a pointer?
   // NOLINTNEXTLINE(runtime/references)
-  explicit P4Objects(std::ostream &outstream = std::cout)
-      : outstream(outstream) { }
+  explicit P4Objects(std::ostream &outstream = std::cout,
+                     bool verbose_output = false)
+      : outstream(outstream), verbose_output(verbose_output) { }
 
   int init_objects(std::istream *is,
-                   LookupStructureFactory * lookup_factory,
+                   LookupStructureFactory *lookup_factory,
                    int device_id = 0, size_t cxt_id = 0,
                    std::shared_ptr<TransportIface> transport = nullptr,
                    const std::set<header_field_pair> &required_fields =
@@ -98,9 +104,13 @@ class P4Objects {
  public:
   PHVFactory &get_phv_factory() { return phv_factory; }
 
-  LearnEngine *get_learn_engine() { return learn_engine.get(); }
+  LearnEngineIface *get_learn_engine() { return learn_engine.get(); }
 
-  AgeingMonitor *get_ageing_monitor() { return ageing_monitor.get(); }
+  std::shared_ptr<TransportIface> get_notifications_transport() {
+    return notifications_transport;
+  }
+
+  AgeingMonitorIface *get_ageing_monitor() { return ageing_monitor.get(); }
 
   void reset_state();
 
@@ -124,9 +134,18 @@ class P4Objects {
     return t_actions_map.at(std::make_pair(table_name, action_name));
   }
 
+  ActionFn *get_action_for_action_profile(
+      const std::string &act_prof_name, const std::string &action_name) const;
+
+  // For most functions I have a get_* version that will throw an exception if
+  // an element does not exist (exception not caught) and a get_*_rt version
+  // that returns a nullptr if it does not exist. I should probably get rid of
+  // the first version...
   Parser *get_parser(const std::string &name) const {
     return parsers.at(name).get();
   }
+
+  Parser *get_parser_rt(const std::string &name) const;
 
   ParseVSet *get_parse_vset(const std::string &name) const {
     return parse_vsets.at(name).get();
@@ -137,6 +156,8 @@ class P4Objects {
   Deparser *get_deparser(const std::string &name) const {
     return deparsers.at(name).get();
   }
+
+  Deparser *get_deparser_rt(const std::string &name) const;
 
   MatchTableAbstract *get_abstract_match_table(const std::string &name) const {
     return match_action_tables_map.at(name)->get_match_table();
@@ -157,6 +178,8 @@ class P4Objects {
   Pipeline *get_pipeline(const std::string &name) const {
     return pipelines_map.at(name).get();
   }
+
+  Pipeline *get_pipeline_rt(const std::string &name) const;
 
   MeterArray *get_meter_array(const std::string &name) const {
     return meter_arrays.at(name).get();
@@ -188,122 +211,145 @@ class P4Objects {
     return extern_instances.at(name).get();
   }
 
+  ExternType *get_extern_instance_rt(const std::string &name) const;
+
+  ActionProfile *get_action_profile(const std::string &name) const {
+    return action_profiles_map.at(name).get();
+  }
+
+  ActionProfile *get_action_profile_rt(const std::string &name) const;
+
   bool field_exists(const std::string &header_name,
                     const std::string &field_name) const;
 
   bool header_exists(const std::string &header_name) const;
 
+  // public to be accessed by test class
+  ActionPrimitive_ *get_primitive(const std::string &name);
+
+  ConfigOptionMap get_config_options() const;
+
+  ErrorCodeMap get_error_codes() const;
+
+  EnumMap::type_t get_enum_value(const std::string &name) const;
+  const std::string &get_enum_name(const std::string &enum_name,
+                                   EnumMap::type_t entry_value) const;
+
  private:
   void add_header_type(const std::string &name,
-                         std::unique_ptr<HeaderType> header_type) {
-    header_types_map[name] = std::move(header_type);
-  }
+                       std::unique_ptr<HeaderType> header_type);
 
-  HeaderType *get_header_type(const std::string &name) {
-    return header_types_map.at(name).get();
-  }
+  HeaderType *get_header_type(const std::string &name);
 
-  void add_header_id(const std::string &name, header_id_t header_id) {
-    header_ids_map[name] = header_id;
-  }
+  void add_header_id(const std::string &name, header_id_t header_id);
 
   void add_header_stack_id(const std::string &name,
-                           header_stack_id_t header_stack_id) {
-    header_stack_ids_map[name] = header_stack_id;
-  }
+                           header_stack_id_t header_stack_id);
 
-  header_id_t get_header_id(const std::string &name) {
-    return header_ids_map.at(name);
-  }
+  void add_header_union_id(const std::string &name,
+                           header_union_id_t header_union_id);
 
-  header_stack_id_t get_header_stack_id(const std::string &name) {
-    return header_stack_ids_map.at(name);
-  }
+  void add_header_union_stack_id(const std::string &name,
+                                 header_union_stack_id_t header_union_stack_id);
 
-  void add_action(p4object_id_t id, std::unique_ptr<ActionFn> action) {
-    actions_map[id] = std::move(action);
-  }
+  header_id_t get_header_id(const std::string &name) const;
+
+  header_stack_id_t get_header_stack_id(const std::string &name) const;
+
+  header_union_id_t get_header_union_id(const std::string &name) const;
+
+  header_union_stack_id_t get_header_union_stack_id(
+      const std::string &name) const;
+
+  void add_action(p4object_id_t id, std::unique_ptr<ActionFn> action);
 
   void add_action_to_table(const std::string &table_name,
-                           const std::string &action_name, ActionFn *action) {
-    t_actions_map[std::make_pair(table_name, action_name)] = action;
-  }
+                           const std::string &action_name, ActionFn *action);
 
-  void add_parser(const std::string &name, std::unique_ptr<Parser> parser) {
-    parsers[name] = std::move(parser);
-  }
+  void add_action_to_act_prof(const std::string &act_prof_name,
+                              const std::string &action_name,
+                              ActionFn *action);
+
+  void add_parser(const std::string &name, std::unique_ptr<Parser> parser);
 
   void add_parse_vset(const std::string &name,
-                      std::unique_ptr<ParseVSet> parse_vset) {
-    parse_vsets[name] = std::move(parse_vset);
-  }
+                      std::unique_ptr<ParseVSet> parse_vset);
 
   void add_deparser(const std::string &name,
-                    std::unique_ptr<Deparser> deparser) {
-    deparsers[name] = std::move(deparser);
-  }
+                    std::unique_ptr<Deparser> deparser);
 
   void add_match_action_table(const std::string &name,
-                              std::unique_ptr<MatchActionTable> table) {
-    add_control_node(name, table.get());
-    match_action_tables_map[name] = std::move(table);
-  }
+                              std::unique_ptr<MatchActionTable> table);
+
+  void add_action_profile(const std::string &name,
+                          std::unique_ptr<ActionProfile> action_profile);
 
   void add_conditional(const std::string &name,
-                       std::unique_ptr<Conditional> conditional) {
-    add_control_node(name, conditional.get());
-    conditionals_map[name] = std::move(conditional);
-  }
+                       std::unique_ptr<Conditional> conditional);
 
-  void add_control_node(const std::string &name, ControlFlowNode *node) {
-    control_nodes_map[name] = node;
-  }
+  void add_control_node(const std::string &name, ControlFlowNode *node);
 
   void add_pipeline(const std::string &name,
-                    std::unique_ptr<Pipeline> pipeline) {
-    pipelines_map[name] = std::move(pipeline);
-  }
+                    std::unique_ptr<Pipeline> pipeline);
 
   void add_meter_array(const std::string &name,
-                       std::unique_ptr<MeterArray> meter_array) {
-    meter_arrays[name] = std::move(meter_array);
-  }
+                       std::unique_ptr<MeterArray> meter_array);
 
   void add_counter_array(const std::string &name,
-                         std::unique_ptr<CounterArray> counter_array) {
-    counter_arrays[name] = std::move(counter_array);
-  }
+                         std::unique_ptr<CounterArray> counter_array);
 
   void add_register_array(const std::string &name,
-                          std::unique_ptr<RegisterArray> register_array) {
-    register_arrays[name] = std::move(register_array);
-  }
+                          std::unique_ptr<RegisterArray> register_array);
 
   void add_named_calculation(const std::string &name,
-                             std::unique_ptr<NamedCalculation> calculation) {
-    calculations[name] = std::move(calculation);
-  }
+                             std::unique_ptr<NamedCalculation> calculation);
 
   void add_field_list(const p4object_id_t field_list_id,
-                      std::unique_ptr<FieldList> field_list) {
-    field_lists[field_list_id] = std::move(field_list);
-  }
+                      std::unique_ptr<FieldList> field_list);
 
   void add_extern_instance(const std::string &name,
-                           std::unique_ptr<ExternType> extern_instance) {
-    extern_instances[name] = std::move(extern_instance);
-  }
+                           std::unique_ptr<ExternType> extern_instance);
+
+  struct InitState;
+  void init_enums(const Json::Value &root);
+  void init_header_types(const Json::Value &root);
+  void init_headers(const Json::Value &root);
+  void init_header_stacks(const Json::Value &root);
+  void init_header_unions(const Json::Value &root, InitState *);
+  void init_header_union_stacks(const Json::Value &root, InitState *);
+  void init_extern_instances(const Json::Value &root);
+  void init_parse_vsets(const Json::Value &root);
+  void init_errors(const Json::Value &root);
+  void init_parsers(const Json::Value &root, InitState *);
+  void init_deparsers(const Json::Value &root);
+  void init_calculations(const Json::Value &root);
+  void init_counter_arrays(const Json::Value &root);
+  void init_meter_arrays(const Json::Value &root, InitState *);
+  void init_register_arrays(const Json::Value &root);
+  void init_actions(const Json::Value &root);
+  void init_pipelines(const Json::Value &root, LookupStructureFactory *,
+                      InitState *);
+  void init_checksums(const Json::Value &root);
+  void init_learn_lists(const Json::Value &root);
+  void init_field_lists(const Json::Value &root);
 
   void build_expression(const Json::Value &json_expression, Expression *expr);
+  void build_expression(const Json::Value &json_expression, Expression *expr,
+                        ExprType *expr_type);
 
-  std::set<int> build_arith_offsets(const Json::Value &json_actions,
-                                    const std::string &header_name);
+  int add_primitive_to_action(const Json::Value &primitive,
+                              ActionFn *action_fn);
+
+  void parse_config_options(const Json::Value &root);
 
  private:
   PHVFactory phv_factory{};  // this is probably temporary
 
   std::unordered_map<std::string, header_id_t> header_ids_map{};
   std::unordered_map<std::string, header_stack_id_t> header_stack_ids_map{};
+  std::unordered_map<std::string, header_union_id_t> header_union_ids_map{};
+  std::unordered_map<std::string, header_union_stack_id_t>
+  header_union_stack_ids_map{};
   std::unordered_map<std::string, HeaderType *> header_to_type_map{};
   std::unordered_map<std::string, HeaderType *> header_stack_to_type_map{};
 
@@ -312,10 +358,13 @@ class P4Objects {
 
   // tables
   std::unordered_map<std::string, std::unique_ptr<MatchActionTable> >
-    match_action_tables_map{};
+  match_action_tables_map{};
+
+  std::unordered_map<std::string, std::unique_ptr<ActionProfile> >
+  action_profiles_map{};
 
   std::unordered_map<std::string, std::unique_ptr<Conditional> >
-    conditionals_map{};
+  conditionals_map{};
 
   std::unordered_map<std::string, ControlFlowNode *> control_nodes_map{};
 
@@ -325,7 +374,7 @@ class P4Objects {
   // actions
   // TODO(antonin): make this a vector?
   std::unordered_map<p4object_id_t, std::unique_ptr<ActionFn> > actions_map{};
-  typedef std::pair<std::string, std::string> table_action_pair;
+  using table_action_pair = std::pair<std::string, std::string>;
   struct TableActionPairKeyHash {
     std::size_t operator()(const table_action_pair& p) const {
       std::size_t seed = 0;
@@ -337,24 +386,34 @@ class P4Objects {
   };
   std::unordered_map<table_action_pair, ActionFn *, TableActionPairKeyHash>
   t_actions_map{};
-  // std::unordered_map<std::string, std::unique_ptr<ActionFn> > actions_map{};
+  using aprof_action_pair = table_action_pair;
+  using AprofActionPairKeyHash = TableActionPairKeyHash;
+  std::unordered_map<aprof_action_pair, ActionFn *, AprofActionPairKeyHash>
+  aprof_actions_map{};
 
   // parsers
   std::unordered_map<std::string, std::unique_ptr<Parser> > parsers{};
   // this is to give the objects a place where to live
   std::vector<std::unique_ptr<ParseState> > parse_states{};
+  // this is to give ActionFn objects a place to live
+  std::vector<std::unique_ptr<ActionFn> > parse_methods{};
 
   // parse vsets
   std::unordered_map<std::string, std::unique_ptr<ParseVSet> > parse_vsets{};
+
+  ErrorCodeMap error_codes;
+
+  EnumMap enums{};
 
   // checksums
   std::vector<std::unique_ptr<Checksum> > checksums{};
 
   std::unordered_map<std::string, std::unique_ptr<Deparser> > deparsers{};
 
-  std::unique_ptr<LearnEngine> learn_engine{};
+  std::unique_ptr<LearnEngineIface> learn_engine{};
+  std::shared_ptr<TransportIface> notifications_transport{};
 
-  std::unique_ptr<AgeingMonitor> ageing_monitor{};
+  std::unique_ptr<AgeingMonitorIface> ageing_monitor{};
 
   // meter arrays
   std::unordered_map<std::string, std::unique_ptr<MeterArray> > meter_arrays{};
@@ -380,22 +439,44 @@ class P4Objects {
 
   std::unordered_map<std::string, header_field_pair> field_aliases{};
 
- public:
-  // public to be accessed by test class
+  // used for initialization only
+  std::unordered_map<p4object_id_t, p4object_id_t> header_id_to_stack_id{};
+  struct HeaderUnionPos {
+    header_union_id_t union_id;
+    size_t offset;  // the offset of the header in the union
+  };
+  std::unordered_map<p4object_id_t, HeaderUnionPos> header_id_to_union_pos{};
+  std::unordered_map<p4object_id_t, header_union_stack_id_t>
+  union_id_to_union_stack_id{};
+
+  ConfigOptionMap config_options{};
+
+  // maps primitive names to primitive instances
+  std::unordered_map<std::string, std::unique_ptr<ActionPrimitive_>>
+      primitives{};
+
   std::ostream &outstream;
+  bool verbose_output;
 
  private:
-  int get_field_offset(header_id_t header_id, const std::string &field_name);
-  size_t get_field_bytes(header_id_t header_id, int field_offset);
-  size_t get_field_bits(header_id_t header_id, int field_offset);
-  size_t get_header_bits(header_id_t header_id);
+  int get_field_offset(header_id_t header_id,
+                       const std::string &field_name) const;
+  size_t get_field_bytes(header_id_t header_id, int field_offset) const;
+  size_t get_field_bits(header_id_t header_id, int field_offset) const;
+  size_t get_header_bits(header_id_t header_id) const;
   std::tuple<header_id_t, int> field_info(const std::string &header_name,
-                                          const std::string &field_name);
+                                          const std::string &field_name) const;
   bool check_required_fields(
       const std::set<header_field_pair> &required_fields);
 
   std::unique_ptr<CalculationsMap::MyC> check_hash(
       const std::string &name) const;
+
+  void enable_arith(header_id_t header_id, int field_offset);
+  void enable_arith(header_id_t header_id);
+
+  std::unique_ptr<Calculation> process_cfg_selector(
+      const Json::Value &cfg_selector) const;
 };
 
 }  // namespace bm

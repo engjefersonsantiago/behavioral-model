@@ -33,8 +33,8 @@ namespace bm {
 
 class InterfaceList {
  public:
-  typedef std::map<int, std::string>::iterator iterator;
-  typedef std::map<int, std::string>::const_iterator const_iterator;
+  using iterator = std::map<int, std::string>::iterator;
+  using const_iterator = std::map<int, std::string>::const_iterator;
 
  public:
   void add(int port, const std::string &iface) {
@@ -60,9 +60,10 @@ class OptionsParser {
 
  private:
   std::string config_file_path{};
+  bool no_p4{false};
   InterfaceList ifaces{};
   bool pcap{false};
-  int thrift_port{};
+  int thrift_port{0};
   int device_id{};
   // if true read/write packets from files instead of interfaces
   bool use_files{false};
@@ -82,6 +83,7 @@ class OptionsParser {
   bool debugger{false};
   std::string debugger_addr{};
   std::string state_file_path{};
+  size_t dump_packet_data{0};
 };
 
 }  // namespace bm

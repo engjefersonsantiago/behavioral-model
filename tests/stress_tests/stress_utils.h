@@ -18,8 +18,8 @@
  *
  */
 
-#ifndef TESTS_STRESS_TESTS_UTILS_H_
-#define TESTS_STRESS_TESTS_UTILS_H_
+#ifndef TESTS_STRESS_TESTS_STRESS_UTILS_H_
+#define TESTS_STRESS_TESTS_STRESS_UTILS_H_
 
 #include <bm/bm_sim/switch.h>
 
@@ -49,12 +49,12 @@ class RandomGen {
 
 class SwitchTest : public bm::Switch {
  public:
-  int receive(int port_num, const char *buffer, int len) override {
+  int receive_(int port_num, const char *buffer, int len) override {
     (void) port_num; (void) buffer; (void) len;
     return 0;
   }
 
-  void start_and_return() override {
+  void start_and_return_() override {
   }
 
   // using pointers as most targets are expected to do that
@@ -64,7 +64,7 @@ class SwitchTest : public bm::Switch {
 
 class TestChrono {
  public:
-  typedef std::chrono::high_resolution_clock clock;
+  using clock = std::chrono::high_resolution_clock;
 
   TestChrono(size_t packet_cnt);
 
@@ -81,4 +81,4 @@ class TestChrono {
 
 }  // namespace stress_tests_utils
 
-#endif  // TESTS_STRESS_TESTS_UTILS_H_
+#endif  // TESTS_STRESS_TESTS_STRESS_UTILS_H_

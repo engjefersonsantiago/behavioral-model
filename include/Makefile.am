@@ -1,13 +1,25 @@
 ACLOCAL_AMFLAGS = ${ACLOCAL_FLAGS} -I m4
 
-nobase_include_HEADERS = \
-bm/bm_apps/learn.h \
-bm/bm_apps/packet_pipe.h
+nobase_include_HEADERS =
 
+if COND_NANOMSG
+nobase_include_HEADERS += \
+bm/bm_apps/notifications.h \
+bm/bm_apps/packet_pipe.h
+if COND_THRIFT
+nobase_include_HEADERS += \
+bm/bm_apps/learn.h
+endif  # COND_THRIFT
+endif  # COND_NANOMSG
+
+if COND_THRIFT
 nobase_include_HEADERS += \
 bm/bm_runtime/bm_runtime.h
+endif
 
 nobase_include_HEADERS += \
+bm/bm_sim/action_entry.h \
+bm/bm_sim/action_profile.h \
 bm/bm_sim/actions.h \
 bm/bm_sim/ageing.h \
 bm/bm_sim/bignum.h \
@@ -23,6 +35,7 @@ bm/bm_sim/debugger.h \
 bm/bm_sim/deparser.h \
 bm/bm_sim/dev_mgr.h \
 bm/bm_sim/entries.h \
+bm/bm_sim/enums.h \
 bm/bm_sim/event_logger.h \
 bm/bm_sim/expressions.h \
 bm/bm_sim/extern.h \
@@ -30,7 +43,6 @@ bm/bm_sim/fields.h \
 bm/bm_sim/field_lists.h \
 bm/bm_sim/handle_mgr.h \
 bm/bm_sim/headers.h \
-bm/bm_sim/header_stacks.h \
 bm/bm_sim/learning.h \
 bm/bm_sim/logger.h \
 bm/bm_sim/lookup_structures.h \
@@ -47,6 +59,7 @@ bm/bm_sim/packet.h \
 bm/bm_sim/packet_buffer.h \
 bm/bm_sim/packet_handler.h \
 bm/bm_sim/parser.h \
+bm/bm_sim/parser_error.h \
 bm/bm_sim/pcap_file.h \
 bm/bm_sim/phv.h \
 bm/bm_sim/phv_forward.h \
@@ -63,6 +76,11 @@ bm/bm_sim/stateful.h \
 bm/bm_sim/switch.h \
 bm/bm_sim/simple_pre.h \
 bm/bm_sim/simple_pre_lag.h \
+bm/bm_sim/stacks.h \
 bm/bm_sim/tables.h \
 bm/bm_sim/target_parser.h \
-bm/bm_sim/transport.h
+bm/bm_sim/transport.h \
+bm/bm_sim/header_unions.h
+
+nobase_include_HEADERS += \
+bm/bm_sim/core/primitives.h

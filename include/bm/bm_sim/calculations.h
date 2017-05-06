@@ -61,20 +61,23 @@
 #include <tuple>
 #include <vector>
 #include <algorithm>   // for std::copy
-#include <ostream>
+#include <iosfwd>
 
 #include "boost/variant.hpp"
 
-#include "phv.h"
-#include "packet.h"
+#include "bytecontainer.h"
+#include "named_p4object.h"
+#include "phv_forward.h"
 
 namespace bm {
+
+class Packet;
 
 /* Used to determine whether a class overloads the '()' operator */
 template <typename T>
 struct defines_functor_operator {
-  typedef char (& yes)[1];
-  typedef char (& no)[2];
+  using yes = char (&)[1];
+  using no = char (&)[2];
 
   // we need a template here to enable SFINAE
   template <typename U>
@@ -137,8 +140,8 @@ struct check_functor_signature {
 template <typename H>
 struct HashChecker<true, H> {
  private:
-  typedef typename callable_traits<H>::return_type return_type;
-  typedef typename callable_traits<H>::argument_type argument_type;
+  using return_type = typename callable_traits<H>::return_type;
+  using argument_type = typename callable_traits<H>::argument_type;
 
   static bool constexpr v1 = std::is_unsigned<return_type>::value;
   static bool constexpr v2 =
@@ -202,7 +205,7 @@ class RawCalculation
     return ptr;
   }
 
-  typedef HashChecker<defines_functor_operator<HashFn>::value, HashFn> HC;
+  using HC = HashChecker<defines_functor_operator<HashFn>::value, HashFn>;
 
   static_assert(defines_functor_operator<HashFn>::value,
                 "HashFn needs to overload '()' operator");
@@ -226,7 +229,16 @@ class RawCalculation
 };
 
 
-struct BufBuilder {
+class BufBuilder {
+ public:
+  void push_back_field(header_id_t header, int field_offset);
+  void push_back_constant(const ByteContainer &v, size_t nbits);
+  void push_back_header(header_id_t header);
+  void append_payload();
+
+  void operator()(const Packet &pkt, ByteContainer *buf) const;
+
+ private:
   struct field_t {
     header_id_t header;
     int field_offset;
@@ -241,94 +253,10 @@ struct BufBuilder {
     header_id_t header;
   };
 
+  struct Deparse;  // defined in calculations.cpp
+
   std::vector<boost::variant<field_t, constant_t, header_t> > entries{};
   bool with_payload{false};
-
-  void push_back_field(header_id_t header, int field_offset) {
-    field_t f = {header, field_offset};
-    entries.emplace_back(f);
-  }
-
-  void push_back_constant(const ByteContainer &v, size_t nbits) {
-    // TODO(antonin): general case
-    assert(nbits % 8 == 0);
-    constant_t c = {v, nbits};
-    entries.emplace_back(c);
-  }
-
-  void push_back_header(header_id_t header) {
-    header_t h = {header};
-    entries.emplace_back(h);
-  }
-
-  void append_payload() {
-    with_payload = true;
-  }
-
-  struct Deparse : public boost::static_visitor<> {
-    Deparse(const PHV &phv, ByteContainer *buf)
-      : phv(phv), buf(buf) { }
-
-    char *extend(int more_bits) {
-      int nbits_ = nbits + more_bits;
-      buf->resize((nbits_ + 7) / 8, '\x00');
-      char *ptr = buf->data() + (nbits / 8);
-      nbits = nbits_;
-      // needed ?
-      // if (new_bytes > 0) buf->back() = '\x00';
-      return ptr;
-    }
-
-    int get_offset() const {
-      return nbits % 8;
-    }
-
-    void operator()(const field_t &f) {
-      const Header &header = phv.get_header(f.header);
-      if (!header.is_valid()) return;
-      const Field &field = header.get_field(f.field_offset);
-      // taken from headers.cpp::deparse
-      const int offset = get_offset();
-      field.deparse(extend(field.get_nbits()), offset);
-    }
-
-    void operator()(const constant_t &c) {
-      assert(get_offset() == 0);
-      std::copy(c.v.begin(), c.v.end(), extend(c.nbits));
-    }
-
-    void operator()(const header_t &h) {
-      assert(get_offset() == 0);
-      const Header &header = phv.get_header(h.header);
-      if (header.is_valid()) {
-        header.deparse(extend(header.get_nbytes_packet() * 8));
-      }
-    }
-
-    Deparse(const Deparse &other) = delete;
-    Deparse &operator=(const Deparse &other) = delete;
-
-    Deparse(Deparse &&other) = delete;
-    Deparse &operator=(Deparse &&other) = delete;
-
-    const PHV &phv;
-    ByteContainer *buf;
-    int nbits{0};
-  };
-
-  void operator()(const Packet &pkt, ByteContainer *buf) const {
-    buf->clear();
-    const PHV *phv = pkt.get_phv();
-    Deparse visitor(*phv, buf);
-    std::for_each(entries.begin(), entries.end(),
-                  boost::apply_visitor(visitor));
-    if (with_payload) {
-      size_t curr = buf->size();
-      size_t psize = pkt.get_data_size();
-      buf->resize(curr + psize);
-      std::copy(pkt.data(), pkt.data() + psize, buf->begin() + curr);
-    }
-  }
 };
 
 
@@ -359,7 +287,7 @@ class Calculation_ {
 
 class CalculationsMap {
  public:
-  typedef RawCalculationIface<uint64_t> MyC;
+  using MyC = RawCalculationIface<uint64_t>;
 
   static CalculationsMap *get_instance();
   bool register_one(const char *name, std::unique_ptr<MyC> c);
@@ -426,26 +354,28 @@ enum class CustomCrcErrorCode {
   INVALID_CONFIG,
 };
 
+namespace detail {
+
+template <typename T>
+struct crc_config_t {
+  T polynomial;
+  T initial_remainder;
+  T final_xor_value;
+  bool data_reflected;
+  bool remainder_reflected;
+};
+
+template <typename T>
+std::ostream &operator<<(std::ostream &out, const crc_config_t<T> &c);
+
+}  // namespace detail
+
 // can be used for crc16, with T == uint16_t
 // can be used for crc32, with T uint32_t
 template <typename T>
 class CustomCrcMgr {
  public:
-  struct crc_config_t {
-    T polynomial;
-    T initial_remainder;
-    T final_xor_value;
-    bool data_reflected;
-    bool remainder_reflected;
-
-    friend std::ostream &operator<<(std::ostream &out, const crc_config_t &c) {
-      out << "polynomial: " << c.polynomial << ", initial_remainder: "
-          << c.initial_remainder << ", final_xor_value: " << c.final_xor_value
-          << ", data_reflected: " << c.data_reflected
-          << ", remainder_reflected: " << c.remainder_reflected;
-      return out;
-    }
-  };
+  using crc_config_t = detail::crc_config_t<T>;
 
   static CustomCrcErrorCode update_config(NamedCalculation *calculation,
                                           const crc_config_t &config);

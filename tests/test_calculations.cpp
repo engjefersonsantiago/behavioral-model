@@ -20,10 +20,14 @@
 
 #include <gtest/gtest.h>
 
-#include <random>
-
 #include <bm/bm_sim/calculations.h>
+#include <bm/bm_sim/packet.h>
 #include <bm/bm_sim/parser.h>
+#include <bm/bm_sim/phv_source.h>
+#include <bm/bm_sim/phv.h>
+
+#include <random>
+#include <algorithm>  // for std::copy
 
 using namespace bm;
 
@@ -38,6 +42,7 @@ class CalculationTest : public ::testing::Test {
   header_id_t testHeader1{0}, testHeader2{1}, testHeader3{2};
 
   ParseState oneParseState;
+  ErrorCodeMap error_codes;
   Parser parser;
 
   std::unique_ptr<PHVSourceIface> phv_source{nullptr};
@@ -52,7 +57,8 @@ class CalculationTest : public ::testing::Test {
       : testHeaderType("test_t", 0),
         testHeaderType2("test2_t", 1),
         oneParseState("parse_state", 0),
-        parser("test_parser", 0),
+        error_codes(ErrorCodeMap::make_with_core()),
+        parser("test_parser", 0, &error_codes),
         phv_source(PHVSourceIface::make_phv_source()) {
     testHeaderType.push_back_field("f16", 16);
     testHeaderType.push_back_field("f48", 48);
@@ -92,17 +98,17 @@ class CalculationTest : public ::testing::Test {
 TEST_F(CalculationTest, SimpleTest) {
   BufBuilder builder;
 
-  builder.push_back_field(testHeader1, 0); // f16
-  builder.push_back_field(testHeader1, 1); // f48
-  builder.push_back_field(testHeader1, 3); // f32_2
+  builder.push_back_field(testHeader1, 0);  // f16
+  builder.push_back_field(testHeader1, 1);  // f48
+  builder.push_back_field(testHeader1, 3);  // f32_2
 
-  builder.push_back_field(testHeader2, 2); // f32_1
+  builder.push_back_field(testHeader2, 2);  // f32_1
 
   Calculation calc(builder, "xxh64");
 
   unsigned char pkt_buf[2 * header_size];
 
-  for(size_t i = 0; i < sizeof(pkt_buf); i++) {
+  for (size_t i = 0; i < sizeof(pkt_buf); i++) {
     pkt_buf[i] = dis(gen);
   }
 
@@ -115,7 +121,7 @@ TEST_F(CalculationTest, SimpleTest) {
   std::copy(&pkt_buf[2], &pkt_buf[8], &expected_buf[2]);
   std::copy(&pkt_buf[12], &pkt_buf[16], &expected_buf[8]);
   std::copy(&pkt_buf[header_size + 8], &pkt_buf[header_size + 12],
-	    &expected_buf[12]);
+            &expected_buf[12]);
 
   auto expected = hash::xxh64(
       reinterpret_cast<const char *>(expected_buf), sizeof(expected_buf));
@@ -127,14 +133,14 @@ TEST_F(CalculationTest, SimpleTest) {
 TEST_F(CalculationTest, NonAlignedTest) {
   BufBuilder builder;
 
-  builder.push_back_field(testHeader1, 4); // f5
-  builder.push_back_field(testHeader1, 5); // f19
+  builder.push_back_field(testHeader1, 4);  // f5
+  builder.push_back_field(testHeader1, 5);  // f19
 
   Calculation calc(builder, "xxh64");;
 
   unsigned char pkt_buf[2 * header_size];
 
-  for(size_t i = 0; i < sizeof(pkt_buf); i++) {
+  for (size_t i = 0; i < sizeof(pkt_buf); i++) {
     pkt_buf[i] = dis(gen);
   }
 
@@ -145,7 +151,8 @@ TEST_F(CalculationTest, NonAlignedTest) {
   unsigned char expected_buf[3];
   std::copy(&pkt_buf[16], &pkt_buf[19], &expected_buf[0]);
 
-  auto expected = hash::xxh64((const char *) expected_buf, sizeof(expected_buf));
+  auto expected = hash::xxh64(reinterpret_cast<const char *>(expected_buf),
+                              sizeof(expected_buf));
   auto actual = calc.output(pkt);
 
   ASSERT_EQ(expected, actual);
@@ -156,16 +163,16 @@ TEST_F(CalculationTest, WithConstant) {
 
   ByteContainer constant("0x12ab");
 
-  builder.push_back_field(testHeader1, 0); // f16
-  builder.push_back_field(testHeader1, 1); // f48
+  builder.push_back_field(testHeader1, 0);  // f16
+  builder.push_back_field(testHeader1, 1);  // f48
   builder.push_back_constant(constant, 16);
-  builder.push_back_field(testHeader1, 3); // f32_2
+  builder.push_back_field(testHeader1, 3);  // f32_2
 
   Calculation calc(builder, "xxh64");
 
   unsigned char pkt_buf[2 * header_size];
 
-  for(size_t i = 0; i < sizeof(pkt_buf); i++) {
+  for (size_t i = 0; i < sizeof(pkt_buf); i++) {
     pkt_buf[i] = dis(gen);
   }
 
@@ -179,7 +186,35 @@ TEST_F(CalculationTest, WithConstant) {
   std::copy(constant.begin(), constant.end(), &expected_buf[8]);
   std::copy(&pkt_buf[12], &pkt_buf[16], &expected_buf[10]);
 
-  auto expected = hash::xxh64((const char *) expected_buf, sizeof(expected_buf));
+  auto expected = hash::xxh64(reinterpret_cast<const char *>(expected_buf),
+                              sizeof(expected_buf));
+  auto actual = calc.output(pkt);
+
+  ASSERT_EQ(expected, actual);
+}
+
+TEST_F(CalculationTest, WithConstantNonAligned) {
+  BufBuilder builder;
+
+  // 0x9fd = 1001 1111 1101
+  ByteContainer constant("0x9fd");
+
+  builder.push_back_constant(ByteContainer("0x00"), 4);
+  builder.push_back_field(testHeader1, 0);  // f16
+  builder.push_back_constant(constant, 12);
+
+  Calculation calc(builder, "identity");
+
+  unsigned char pkt_buf[2 * header_size];
+
+  for (size_t i = 0; i < sizeof(pkt_buf); i++) {
+    pkt_buf[i] = 0xff;
+  }
+
+  Packet pkt = get_pkt((const char *) pkt_buf, sizeof(pkt_buf));
+  parser.parse(&pkt);
+
+  auto expected = static_cast<uint64_t>(0x0ffff9fd);
   auto actual = calc.output(pkt);
 
   ASSERT_EQ(expected, actual);
@@ -188,9 +223,9 @@ TEST_F(CalculationTest, WithConstant) {
 TEST_F(CalculationTest, WithPayload) {
   BufBuilder builder;
 
-  builder.push_back_field(testHeader1, 0); // f16
-  builder.push_back_field(testHeader1, 1); // f48
-  builder.push_back_field(testHeader1, 3); // f32_2
+  builder.push_back_field(testHeader1, 0);  // f16
+  builder.push_back_field(testHeader1, 1);  // f48
+  builder.push_back_field(testHeader1, 3);  // f32_2
   builder.push_back_header(testHeader2);
   builder.append_payload();
 
@@ -198,7 +233,7 @@ TEST_F(CalculationTest, WithPayload) {
 
   unsigned char pkt_buf[2 * header_size + 196];
 
-  for(size_t i = 0; i < sizeof(pkt_buf); i++) {
+  for (size_t i = 0; i < sizeof(pkt_buf); i++) {
     pkt_buf[i] = dis(gen);
   }
 
@@ -211,9 +246,10 @@ TEST_F(CalculationTest, WithPayload) {
   std::copy(&pkt_buf[2], &pkt_buf[8], &expected_buf[2]);
   std::copy(&pkt_buf[12], &pkt_buf[16], &expected_buf[8]);
   std::copy(&pkt_buf[header_size], &pkt_buf[sizeof(pkt_buf)],
-	    &expected_buf[12]);
+            &expected_buf[12]);
 
-  auto expected = hash::xxh64((const char *) expected_buf, sizeof(expected_buf));
+  auto expected = hash::xxh64(reinterpret_cast<const char *>(expected_buf),
+                              sizeof(expected_buf));
   auto actual = calc.output(pkt);
 
   ASSERT_EQ(expected, actual);
@@ -224,10 +260,10 @@ TEST_F(CalculationTest, WithPayload) {
 TEST_F(CalculationTest, Extra) {
   BufBuilder builder;
 
-  builder.push_back_field(testHeader3, 0); // f6
-  builder.push_back_field(testHeader3, 1); // f8
-  builder.push_back_field(testHeader3, 2); // f9
-  builder.push_back_field(testHeader3, 3); // f9
+  builder.push_back_field(testHeader3, 0);  // f6
+  builder.push_back_field(testHeader3, 1);  // f8
+  builder.push_back_field(testHeader3, 2);  // f9
+  builder.push_back_field(testHeader3, 3);  // f9
 
   Calculation calc(builder, "identity");
 
@@ -259,12 +295,15 @@ struct Hash {
 
 REGISTER_HASH(Hash);
 
-}
+}  // namespace
 
 TEST(CalculationsMap, Test) {
   ASSERT_NE(nullptr, CalculationsMap::get_instance()->get_copy("Hash"));
 
   ASSERT_EQ(nullptr, CalculationsMap::get_instance()->get_copy("Hash_Neg"));
+
+  // avoids warning for REGISTER_HASH in anonymous namespace
+  ASSERT_EQ(true, Hash_create_);
 }
 
 // Could use a templatized test for this, but is it worth it?
@@ -339,8 +378,6 @@ TEST(HashTest, Crc32) {
 }
 
 TEST(HashTest, Crc16Custom) {
-  typedef CustomCrcMgr<uint16_t>::crc_config_t crc16_config_t;
-
   auto ptr = CalculationsMap::get_instance()->get_copy("crc16_custom");
   ASSERT_NE(nullptr, ptr);
 
@@ -384,8 +421,6 @@ TEST(HashTest, Crc16Custom) {
 }
 
 TEST(HashTest, Crc32Custom) {
-  typedef CustomCrcMgr<uint32_t>::crc_config_t crc32_config_t;
-
   auto ptr = CalculationsMap::get_instance()->get_copy("crc32_custom");
   ASSERT_NE(nullptr, ptr);
 

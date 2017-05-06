@@ -34,8 +34,8 @@ namespace {
 
 struct hash_ex {
   uint32_t operator()(const char *buf, size_t s) const {
-    const int p = 16777619;
-    int hash = 2166136261;
+    const uint32_t p = 16777619;
+    uint32_t hash = 2166136261;
 
     for (size_t i = 0; i < s; i++)
       hash = (hash ^ buf[i]) * p;
@@ -117,7 +117,7 @@ SimpleSwitch::SimpleSwitch(int max_port, bool enable_swap)
 #define PACKET_LENGTH_REG_IDX 0
 
 int
-SimpleSwitch::receive(int port_num, const char *buffer, int len) {
+SimpleSwitch::receive_(int port_num, const char *buffer, int len) {
   static int pkt_id = 0;
 
   // this is a good place to call this, because blocking this thread will not
@@ -159,7 +159,7 @@ SimpleSwitch::receive(int port_num, const char *buffer, int len) {
 }
 
 void
-SimpleSwitch::start_and_return() {
+SimpleSwitch::start_and_return_() {
   check_queueing_metadata();
 
   std::thread t1(&SimpleSwitch::ingress_thread, this);
@@ -173,7 +173,7 @@ SimpleSwitch::start_and_return() {
 }
 
 void
-SimpleSwitch::reset_target_state() {
+SimpleSwitch::reset_target_state_() {
   bm::Logger::get()->debug("Resetting simple_switch target-specific state");
   get_component<McSimplePreLAG>()->reset_state();
 }
@@ -204,6 +204,17 @@ SimpleSwitch::set_all_egress_queue_rates(const uint64_t rate_pps) {
     set_egress_queue_rate(i, rate_pps);
   }
   return 0;
+}
+
+uint64_t
+SimpleSwitch::get_time_elapsed_us() const {
+  return get_ts().count();
+}
+
+uint64_t
+SimpleSwitch::get_time_since_epoch_us() const {
+  auto tp = clock::now();
+  return duration_cast<ts_res>(tp.time_since_epoch()).count();
 }
 
 void
@@ -260,11 +271,7 @@ SimpleSwitch::copy_ingress_pkt(
   PHV *phv_copy = packet_copy->get_phv();
   phv_copy->reset_metadata();
   FieldList *field_list = this->get_field_list(field_list_id);
-  const PHV *phv = packet->get_phv();
-  for (const auto &p : *field_list) {
-    phv_copy->get_field(p.header, p.offset)
-        .set(phv->get_field(p.header, p.offset));
-  }
+  field_list->copy_fields_between_phvs(phv_copy, packet->get_phv());
   phv_copy->get_field("standard_metadata.instance_type").set(copy_type);
   return packet_copy;
 }
@@ -293,7 +300,8 @@ SimpleSwitch::ingress_thread() {
   PHV *phv;
 
   while (1) {
-    std::unique_ptr<Packet> packet;
+
+  	std::unique_ptr<Packet> packet;
     input_buffer.pop_back(&packet);
 
     ti_ingress = std::chrono::high_resolution_clock::now();
@@ -408,14 +416,16 @@ SimpleSwitch::ingress_thread() {
         // optimized way of doing this
         auto packet_copy = copy_ingress_pkt(
             packet, PKT_INSTANCE_TYPE_RESUBMIT, field_list_id);
-        PHV *phv_copy = packet_copy->get_phv();
-        size_t packet_size = packet_copy->get_data_size();
+  		auto *phv_copy = packet_copy->get_phv();
+        auto packet_size = packet_copy->get_data_size();
         packet_copy->set_register(PACKET_LENGTH_REG_IDX, packet_size);
         phv_copy->get_field("standard_metadata.packet_length").set(packet_size);
+        packet_copy->set_ingress_length((int)packet_size);
         input_buffer.push_front(std::move(packet_copy));
         tf_ingress = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>
             (tf_ingress - ti_ingress).count();
+
         std::cout << "Modify and Resubmit Latency: " << duration << " useconds\n";
         continue;
       }
@@ -455,7 +465,6 @@ SimpleSwitch::ingress_thread() {
     }
 
     enqueue(egress_port, std::move(packet));
-    //tf_ingress = std::chrono::high_resolution_clock::now();
   }
 }
 
@@ -506,10 +515,7 @@ SimpleSwitch::egress_thread(size_t worker_id) {
             packet->clone_with_phv_reset_metadata_ptr();
         PHV *phv_copy = packet_copy->get_phv();
         FieldList *field_list = this->get_field_list(field_list_id);
-        for (const auto &p : *field_list) {
-          phv_copy->get_field(p.header, p.offset)
-            .set(phv->get_field(p.header, p.offset));
-        }
+        field_list->copy_fields_between_phvs(phv_copy, phv);
         phv_copy->get_field("standard_metadata.instance_type")
             .set(PKT_INSTANCE_TYPE_EGRESS_CLONE);
         enqueue(egress_port, std::move(packet_copy));
@@ -538,15 +544,13 @@ SimpleSwitch::egress_thread(size_t worker_id) {
         std::unique_ptr<Packet> packet_copy = packet->clone_no_phv_ptr();
         PHV *phv_copy = packet_copy->get_phv();
         phv_copy->reset_metadata();
-        for (const auto &p : *field_list) {
-          phv_copy->get_field(p.header, p.offset)
-              .set(phv->get_field(p.header, p.offset));
-        }
+        field_list->copy_fields_between_phvs(phv_copy, phv);
         phv_copy->get_field("standard_metadata.instance_type")
             .set(PKT_INSTANCE_TYPE_RECIRC);
         size_t packet_size = packet_copy->get_data_size();
         packet_copy->set_register(PACKET_LENGTH_REG_IDX, packet_size);
         phv_copy->get_field("standard_metadata.packet_length").set(packet_size);
+        packet_copy->set_ingress_length((int)packet_size);
         input_buffer.push_front(std::move(packet_copy));
         tf_egress = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>

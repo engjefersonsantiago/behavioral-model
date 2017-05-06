@@ -14,6 +14,7 @@ AM_CFLAGS += $(COVERAGE_FLAGS)
 noinst_LTLIBRARIES = libbmsim.la
 
 libbmsim_la_SOURCES = \
+action_profile.cpp \
 actions.cpp \
 ageing.cpp \
 bytecontainer.cpp \
@@ -28,12 +29,14 @@ deparser.cpp \
 dev_mgr.cpp \
 dev_mgr_bmi.cpp \
 dev_mgr_packet_in.cpp \
+enums.cpp \
 event_logger.cpp \
 expressions.cpp \
 extern.cpp \
 extract.h \
 fields.cpp \
 headers.cpp \
+header_unions.cpp \
 learning.cpp \
 lookup_structures.cpp \
 logger.cpp \
@@ -47,6 +50,7 @@ options_parse.cpp \
 P4Objects.cpp \
 packet.cpp \
 parser.cpp \
+parser_error.cpp \
 pcap_file.cpp \
 pipeline.cpp \
 port_monitor.cpp \
@@ -56,10 +60,16 @@ stateful.cpp \
 switch.cpp \
 simple_pre.cpp \
 simple_pre_lag.cpp \
+stacks.cpp \
+tables.cpp \
 target_parser.cpp \
 transport.cpp \
+transport_nn.cpp \
 utils.h \
 version.cpp \
 version.h \
 xxhash.c \
 xxhash.h
+
+libbmsim_la_SOURCES += \
+core/primitives.cpp

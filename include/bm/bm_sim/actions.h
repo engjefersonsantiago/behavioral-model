@@ -56,6 +56,11 @@
 //!   - `[const] MeterArray &`
 //!   - `[const] CounterArray &`
 //!   - `[const] RegisterArray &`
+//!   - `[const] HeaderUnion &`
+//!   - `[const] StackIface &` for arbitrary P4 stacks
+//!   - `[const] HeaderStack &` for P4 header stacks
+//!   - `[const] HeaderUnionStack &` for P4 header union stacks
+//!   - `const std::string &` or `const char *` for strings
 //!
 //! You can declare and register primitives anywhere in your switch target C++
 //! code.
@@ -69,7 +74,7 @@
 #include <memory>
 #include <unordered_map>
 #include <string>
-#include <iostream>
+#include <iosfwd>
 #include <limits>
 #include <tuple>
 
@@ -77,16 +82,18 @@
 
 #include "phv.h"
 #include "named_p4object.h"
-#include "packet.h"
-#include "calculations.h"
-#include "meters.h"
-#include "counters.h"
-#include "stateful.h"
 #include "expressions.h"
+#include "stateful.h"
 
 namespace bm {
 
 class P4Objects;  // forward declaration for deserialize
+
+// some forward declarations for needed p4 objects
+class Packet;
+class NamedCalculation;
+class MeterArray;
+class CounterArray;
 
 // forward declaration of ActionPrimitive_
 class ActionPrimitive_;
@@ -96,27 +103,30 @@ class ActionPrimitive_;
 // them in this map using the REGISTER_PRIMITIVE(primitive_name) macro.
 class ActionOpcodesMap {
  public:
+  using ActionPrimitiveFactoryFn =
+      std::function<std::unique_ptr<ActionPrimitive_>()>;
   static ActionOpcodesMap *get_instance();
-  bool register_primitive(
-      const char *name,
-      std::unique_ptr<ActionPrimitive_> primitive);
+  bool register_primitive(const char *name, ActionPrimitiveFactoryFn primitive);
 
-  ActionPrimitive_ *get_primitive(const std::string &name);
+  std::unique_ptr<ActionPrimitive_> get_primitive(const std::string &name);
  private:
+  ActionOpcodesMap();
+
   // Maps primitive names to their implementation.
   // The same pointer is used system-wide, even if a primitive is called from
   // different actions. As such, one has to be careful if some state is
   // maintained byt the primitive functor.
-  std::unordered_map<std::string, std::unique_ptr<ActionPrimitive_> > map_{};
+  std::unordered_map<std::string, ActionPrimitiveFactoryFn> map_{};
 };
 
 //! When implementing an action primitive for a target, this macro needs to be
 //! called to make this module aware of the primitive existence.
-#define REGISTER_PRIMITIVE(primitive_name)                              \
-  bool primitive_name##_create_ =                                       \
-      bm::ActionOpcodesMap::get_instance()->register_primitive(         \
-          #primitive_name,                                              \
-          std::unique_ptr<bm::ActionPrimitive_>(new primitive_name()));
+#define REGISTER_PRIMITIVE(primitive_name)                                  \
+  bool primitive_name##_create_ =                                           \
+      bm::ActionOpcodesMap::get_instance()->register_primitive(             \
+          #primitive_name,                                                  \
+          [](){ return std::unique_ptr<::bm::ActionPrimitive_>(             \
+              new primitive_name()); })
 
 //! This macro can also be called when registering a primitive for a target, in
 //! case you want to register the primitive under a different name than its
@@ -125,7 +135,8 @@ class ActionOpcodesMap {
   bool primitive##_create_ =                                            \
       bm::ActionOpcodesMap::get_instance()->register_primitive(         \
           primitive_name,                                               \
-          std::unique_ptr<bm::ActionPrimitive_>(new primitive()));
+          [](){ return std::unique_ptr<::bm::ActionPrimitive_>(         \
+              new primitive()); })
 
 struct ActionData {
   const Data &get(int offset) const { return action_data[offset]; }
@@ -155,9 +166,7 @@ struct ActionEngineState {
 
   ActionEngineState(Packet *pkt,
                     const ActionData &action_data,
-                    const std::vector<Data> &const_values)
-    : pkt(*pkt), phv(*pkt->get_phv()),
-      action_data(action_data), const_values(const_values) {}
+                    const std::vector<Data> &const_values);
 };
 
 class ExternType;
@@ -170,10 +179,13 @@ struct ActionParam {
   // some old P4 primitives take a calculation as a parameter, I don't know if I
   // will keep it around but for now I need it
   enum {CONST, FIELD, HEADER, ACTION_DATA, REGISTER_REF, REGISTER_GEN,
-        HEADER_STACK, CALCULATION,
+        HEADER_STACK, LAST_HEADER_STACK_FIELD,
+        CALCULATION,
         METER_ARRAY, COUNTER_ARRAY, REGISTER_ARRAY,
         EXPRESSION,
-        EXTERN_INSTANCE} tag;
+        EXTERN_INSTANCE,
+        STRING,
+        HEADER_UNION, HEADER_UNION_STACK} tag;
 
   union {
     unsigned int const_offset;
@@ -203,6 +215,12 @@ struct ActionParam {
 
     header_stack_id_t header_stack;
 
+    // special case when trying to access a field in the last header of a stack
+    struct {
+      header_stack_id_t header_stack;
+      int field_offset;
+    } stack_field;
+
     // non owning pointer
     const NamedCalculation *calculation;
 
@@ -224,6 +242,14 @@ struct ActionParam {
     } expression;
 
     ExternType *extern_instance;
+
+    // I use a pointer here to avoid complications with the union; the string
+    // memory is owned by ActionFn (just like for ArithExpression above)
+    const std::string *str;
+
+    header_union_stack_id_t header_union_stack;
+
+    header_union_id_t header_union;
   };
 
   // convert to the correct type when calling a primitive
@@ -248,6 +274,9 @@ Data &ActionParam::to<Data &>(ActionEngineState *state) const {
       register_gen.idx->eval(state->phv, &data_temp,
                              state->action_data.action_data);
       return register_ref.array->at(data_temp.get<size_t>());
+    case ActionParam::LAST_HEADER_STACK_FIELD:
+      return state->phv.get_header_stack(stack_field.header_stack).get_last()
+          .get_field(stack_field.field_offset);
     default:
       assert(0);
   }
@@ -281,6 +310,9 @@ const Data &ActionParam::to<const Data &>(ActionEngineState *state) const {
       expression.ptr->eval(state->phv, &data_temps[expression.offset],
                               state->action_data.action_data);
       return data_temps[expression.offset];
+    case ActionParam::LAST_HEADER_STACK_FIELD:
+      return state->phv.get_header_stack(stack_field.header_stack).get_last()
+          .get_field(stack_field.field_offset);
     default:
       assert(0);
   }
@@ -321,6 +353,49 @@ template <> inline
 const HeaderStack &ActionParam::to<const HeaderStack &>(
     ActionEngineState *state) const {
   return ActionParam::to<HeaderStack &>(state);
+}
+
+template <> inline
+StackIface &ActionParam::to<StackIface &>(ActionEngineState *state) const {
+  switch (tag) {
+    case HEADER_STACK:
+      return state->phv.get_header_stack(header_stack);
+    case HEADER_UNION_STACK:
+      return state->phv.get_header_union_stack(header_union_stack);
+    default:
+      assert(0);
+  }
+}
+
+template <> inline
+const StackIface &ActionParam::to<const StackIface &>(
+    ActionEngineState *state) const {
+  return ActionParam::to<StackIface &>(state);
+}
+
+template <> inline
+HeaderUnion &ActionParam::to<HeaderUnion &>(ActionEngineState *state) const {
+  assert(tag == ActionParam::HEADER_UNION);
+  return state->phv.get_header_union(header_union);
+}
+
+template <> inline
+const HeaderUnion &ActionParam::to<const HeaderUnion &>(
+    ActionEngineState *state) const {
+  return ActionParam::to<HeaderUnion &>(state);
+}
+
+template <> inline
+HeaderUnionStack &ActionParam::to<HeaderUnionStack &>(
+    ActionEngineState *state) const {
+  assert(tag == ActionParam::HEADER_UNION_STACK);
+  return state->phv.get_header_union_stack(header_union_stack);
+}
+
+template <> inline
+const HeaderUnionStack &ActionParam::to<const HeaderUnionStack &>(
+    ActionEngineState *state) const {
+  return ActionParam::to<HeaderUnionStack &>(state);
 }
 
 template <> inline
@@ -376,6 +451,23 @@ ExternType *ActionParam::to<ExternType *>(ActionEngineState *state) const {
   (void) state;
   assert(tag == ActionParam::EXTERN_INSTANCE);
   return extern_instance;
+}
+
+template <> inline
+const std::string &ActionParam::to<const std::string &>(
+    ActionEngineState *state) const {
+  assert(tag == ActionParam::STRING);
+  (void) state;
+  return *str;
+}
+
+// just a convenience function, I expect the version above to be the most used
+// one
+template <> inline
+const char *ActionParam::to<const char *>(ActionEngineState *state) const {
+  assert(tag == ActionParam::STRING);
+  (void) state;
+  return str->c_str();
 }
 
 /* This is adapted from stack overflow code:
@@ -434,6 +526,10 @@ class ActionPrimitive_ {
 
   virtual size_t get_num_params() = 0;
 
+  void _set_p4objects(P4Objects *p4objects) {
+    this->p4objects = p4objects;
+  }
+
  protected:
   // This used to be regular members in ActionPrimitive, but there could be a
   // race condition. Making them thread_local solves the issue. I moved these
@@ -442,6 +538,13 @@ class ActionPrimitive_ {
   // (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=60056).
   static thread_local Packet *pkt;
   static thread_local PHV *phv;
+
+  P4Objects *get_p4objects() {
+    return p4objects;
+  }
+
+ private:
+  P4Objects *p4objects{nullptr};
 };
 
 //! This acts as the base class for all target-specific action primitives. It
@@ -500,12 +603,20 @@ class ActionFn :  public NamedP4Object {
   friend class ActionFnEntry;
 
  public:
-  ActionFn(const std::string &name, p4object_id_t id)
-    : NamedP4Object(name, id) { }
+  ActionFn(const std::string &name, p4object_id_t id, size_t num_params)
+      : NamedP4Object(name, id), num_params(num_params) { }
 
+  // these parameter_push_back_* methods are not very well named. They are used
+  // to push arguments to the primitives; and are independent of the actual
+  // parameters for the P4 action
   void parameter_push_back_field(header_id_t header, int field_offset);
   void parameter_push_back_header(header_id_t header);
   void parameter_push_back_header_stack(header_stack_id_t header_stack);
+  void parameter_push_back_last_header_stack_field(
+      header_stack_id_t header_stack, int field_offset);
+  void parameter_push_back_header_union(header_union_id_t header_union);
+  void parameter_push_back_header_union_stack(
+      header_union_stack_id_t header_union_stack);
   void parameter_push_back_const(const Data &data);
   void parameter_push_back_action_data(int action_data_offset);
   void parameter_push_back_register_ref(RegisterArray *register_array,
@@ -518,11 +629,13 @@ class ActionFn :  public NamedP4Object {
   void parameter_push_back_register_array(RegisterArray *register_array);
   void parameter_push_back_expression(std::unique_ptr<ArithExpression> expr);
   void parameter_push_back_extern_instance(ExternType *extern_instance);
+  void parameter_push_back_string(const std::string &str);
 
   void push_back_primitive(ActionPrimitive_ *primitive);
 
-  // TODO(antonin)
-  // size_t num_params() const { 0u; }
+  void grab_register_accesses(RegisterSync *register_sync) const;
+
+  size_t get_num_params() const;
 
  private:
   std::vector<ActionPrimitive_ *> primitives{};
@@ -531,6 +644,8 @@ class ActionFn :  public NamedP4Object {
   std::vector<Data> const_values{};
   // should I store the objects in the vector, instead of pointers?
   std::vector<std::unique_ptr<ArithExpression> > expressions{};
+  std::vector<std::string> strings{};
+  size_t num_params;
 
  private:
   static size_t nb_data_tmps;
@@ -547,7 +662,10 @@ class ActionFnEntry {
   explicit ActionFnEntry(const ActionFn *action_fn)
     : action_fn(action_fn) { }
 
+  // log event, notify debugger if needed, lock registers, then call execute()
   void operator()(Packet *pkt) const;
+
+  void execute(Packet *pkt) const;
 
   void push_back_action_data(const Data &data);
 
@@ -582,7 +700,9 @@ class ActionFnEntry {
   ActionFnEntry(const ActionFnEntry &other) = default;
   ActionFnEntry &operator=(const ActionFnEntry &other) = default;
 
+  // NOLINTNEXTLINE(whitespace/operators)
   ActionFnEntry(ActionFnEntry &&other) /*noexcept*/ = default;
+  // NOLINTNEXTLINE(whitespace/operators)
   ActionFnEntry &operator=(ActionFnEntry &&other) /*noexcept*/ = default;
 
  private:

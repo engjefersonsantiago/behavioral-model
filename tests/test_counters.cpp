@@ -20,16 +20,19 @@
 
 #include <gtest/gtest.h>
 
-#include <random>
-
 #include <bm/bm_sim/counters.h>
+#include <bm/bm_sim/packet.h>
+#include <bm/bm_sim/phv.h>
+#include <bm/bm_sim/phv_source.h>
+
+#include <random>
 
 using namespace bm;
 
 // Google Test fixture for counter tests
 class CountersTest : public ::testing::Test {
  protected:
-  typedef Counter::counter_value_t counter_value_t;
+  using counter_value_t = Counter::counter_value_t;
 
  protected:
   PHVFactory phv_factory;
@@ -72,7 +75,7 @@ TEST_F(CountersTest, SimpleTest) {
 
   const size_t nb_pkts = 10;
   size_t byte_count = 0;
-  for(size_t i = 0; i < nb_pkts; ++i) {
+  for (size_t i = 0; i < nb_pkts; ++i) {
     const size_t pkt_size = dis(gen);
     const Packet pkt = get_pkt(pkt_size);
     byte_count += pkt_size;
@@ -95,7 +98,7 @@ TEST_F(CountersTest, CounterArray) {
 
   CounterArray c_array("counter", 0, 128);
 
-  for(Counter &c : c_array) {
+  for (Counter &c : c_array) {
     c.query_counter(&bytes, &packets);
     ASSERT_EQ(0u, bytes);
     ASSERT_EQ(0u, packets);

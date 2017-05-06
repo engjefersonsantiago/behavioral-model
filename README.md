@@ -27,7 +27,7 @@ On Ubuntu 14.04, the following packages are required:
 - libboost-thread-dev
 - libevent-dev
 - libtool
-- flex 
+- flex
 - bison
 - pkg-config
 - g++
@@ -44,14 +44,22 @@ travis/install-nnpy.sh
 To make your life easier, we provide the *install_deps.sh* script, which will
 install all the dependencies needed on Ubuntu 14.04.
 
-Our Travis regression tests run on Ubuntu 12.04. Look at .travis.yml for more
-information on the Ubuntu 12.04 dependencies.
+Our Travis regression tests now run on Ubuntu 14.04.
+
+On MacOS you can use the tools/macos/bootstrap_mac.sh script to
+install all the above dependencies using homebrew. Note that in order
+to compile the code you need [XCode 8](https://itunes.apple.com/us/app/xcode/id497799835?mt=12)
+or later.
 
 ## Building the code
 
     1. ./autogen.sh
     2. ./configure
     3. make
+    4. [sudo] make install  # if you need to install bmv2
+
+In addition, on Linux, you may have to run `sudo ldconfig` after installing
+bmv2, to refresh the shared library cache.
 
 Debug logging is enabled by default. If you want to disable it for performance
 reasons, you can pass `--disable-logging-macros` to the `configure` script.
@@ -122,7 +130,7 @@ option. Accepted values are: *None*, *SimplePre* (default value) and
 *simple_switch* target uses the *SimplePreLAG* engine.
 
 You can take a look at the *commands.txt* file for
-[*l2_switch*](targets/l2_switch/commands.txt) and 
+[*l2_switch*](targets/l2_switch/commands.txt) and
 [*simple_router*](targets/simple_router/commands.txt) to see how the CLI can be
 used.
 
@@ -169,6 +177,10 @@ Then in a second terminal:
 
 Now the switch is running and the tables have been populated. You can run
 *pingall* in Mininet or start a TCP flow with iperf between hosts *h1* and *h2*.
+
+When running a P4 program with *simple_switch* (instead of *simple_router* in
+the above example), just provide the appropriate `simple_switch` binary to
+`1sw_demo.py` with `--behavioral-exe`.
 
 ## FAQ
 

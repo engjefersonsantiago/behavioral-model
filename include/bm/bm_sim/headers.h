@@ -23,43 +23,59 @@
 #ifndef BM_BM_SIM_HEADERS_H_
 #define BM_BM_SIM_HEADERS_H_
 
-#include <algorithm>  // for std::swap
 #include <vector>
 #include <string>
 #include <set>
 
 #include "fields.h"
 #include "named_p4object.h"
-#include "expressions.h"
+#include "phv_forward.h"
 
 namespace bm {
 
-typedef p4object_id_t header_type_id_t;
+using header_type_id_t = p4object_id_t;
 
-class PHV;
+class VLHeaderExpression;
+class ArithExpression;
+
+class HeaderUnion;
 
 class HeaderType : public NamedP4Object {
  public:
-  HeaderType(const std::string &name, p4object_id_t id)
-    : NamedP4Object(name, id) {}
+  // do not specify custome values for enum entries, the value is used directly
+  // as an offset...
+  enum class HiddenF {
+    VALID
+  };
+
+  struct FInfo {
+    std::string name;
+    int bitwidth;
+    bool is_signed;
+    bool is_VL;
+    bool is_hidden;
+  };
+
+  size_t get_hidden_offset(HiddenF hf) const {
+    return fields_info.size() - 1 - static_cast<size_t>(hf);
+  }
+
+  HeaderType(const std::string &name, p4object_id_t id);
 
   // returns field offset
   int push_back_field(const std::string &field_name, int field_bit_width,
-                      bool is_signed = false) {
-    fields_info.push_back({field_name, field_bit_width, is_signed});
-    return fields_info.size() - 1;
-  }
+                      bool is_signed = false, bool is_VL = false);
 
+  // if field_length_expr is nullptr it means that the length will have to be
+  // provided to extract
   int push_back_VL_field(
       const std::string &field_name,
+      int max_header_bytes,
       std::unique_ptr<VLHeaderExpression> field_length_expr,
-      bool is_signed = false) {
-    int offset = push_back_field(field_name, 0, is_signed);
-    // TODO(antonin)
-    assert(!is_VL_header() && "header can only have one VL field");
-    VL_expr_raw = std::move(field_length_expr);
-    VL_offset = offset;
-    return offset;
+      bool is_signed = false);
+
+  const FInfo &get_finfo(int field_offset) const {
+    return fields_info.at(field_offset);
   }
 
   int get_bit_width(int field_offset) const {
@@ -97,46 +113,38 @@ class HeaderType : public NamedP4Object {
   }
 
   bool is_VL_header() const {
-    return (VL_expr_raw != nullptr);
+    return (VL_offset >= 0);
   }
 
-  std::unique_ptr<ArithExpression> resolve_VL_expr(
-      header_id_t header_id) const {
-    if (!is_VL_header()) return nullptr;
-    std::unique_ptr<ArithExpression> expr(new ArithExpression());
-    *expr = VL_expr_raw->resolve(header_id);
-    return expr;
-  }
+  bool has_VL_expr() const;
 
-  const std::vector<int> &get_VL_input_offsets() const {
-    return VL_expr_raw->get_input_offsets();
-  }
+  std::unique_ptr<ArithExpression> resolve_VL_expr(header_id_t header_id) const;
+
+  const std::vector<int> &get_VL_input_offsets() const;
 
   int get_VL_offset() const {
     return VL_offset;
   }
 
+  int get_VL_max_header_bytes() const;
+
  private:
-  struct FInfo {
-    std::string name;
-    int bitwidth;
-    bool is_signed;
-  };
   std::vector<FInfo> fields_info;
   // used for VL headers only
-  std::unique_ptr<VLHeaderExpression> VL_expr_raw{nullptr};
+  std::unique_ptr<VLHeaderExpression> VL_expr_raw;
   int VL_offset{-1};
+  int VL_max_header_bytes{0};
 };
 
 //! Used to represent P4 header instances. It includes a vector of Field
 //! objects.
 class Header : public NamedP4Object {
  public:
-  typedef std::vector<Field>::iterator iterator;
-  typedef std::vector<Field>::const_iterator const_iterator;
-  typedef std::vector<Field>::reference reference;
-  typedef std::vector<Field>::const_reference const_reference;
-  typedef size_t size_type;
+  using iterator = std::vector<Field>::iterator;
+  using const_iterator = std::vector<Field>::const_iterator;
+  using reference = std::vector<Field>::reference;
+  using const_reference = std::vector<Field>::const_reference;
+  using size_type = size_t;
 
   friend class PHV;
 
@@ -151,6 +159,8 @@ class Header : public NamedP4Object {
     return nbytes_packet;
   }
 
+  int recompute_nbytes_packet();
+
   //! Returns true if this header is marked valid
   bool is_valid() const {
     return (metadata || valid);
@@ -162,20 +172,21 @@ class Header : public NamedP4Object {
   }
 
   //! Marks the header as valid
-  void mark_valid() {
-    valid = true;
-  }
+  void mark_valid();
 
   //! Marks the header as not-valid
-  void mark_invalid() {
-    valid = false;
-  }
+  void mark_invalid();
 
-  //! Sets all the fields in the header to value `0`
-  void reset() {
-    for (Field &f : fields)
-      f.set(0);
-  }
+  //! Sets all the fields in the header to value `0`.
+  void reset();
+
+  void reset_VL_header();
+
+  //! Set the written_to flag maintained by each field. This flag can be queried
+  //! at any time by the target, using the Field interface, and can be used to
+  //! check whether the field has been modified since written_to was last set to
+  //! `false`.
+  void set_written_to(bool written_to_value);
 
   //! Returns a reference to the Field at the specified offset, with bounds
   //! checking. If pos not within the range of the container, an exception of
@@ -201,10 +212,13 @@ class Header : public NamedP4Object {
   //! Returns true if this header is an instance of a Variable-Length header
   //! type, i.e. contains a field whose length is determined when the header is
   //! extracted from the packet data.
-  bool is_VL_header() const { return VL_expr != nullptr; }
+  bool is_VL_header() const { return header_type.is_VL_header(); }
 
   // phv needed for variable length extraction
   void extract(const char *data, const PHV &phv);
+
+  // extract a VL header for which the bitwidth of the VL field is already known
+  void extract_VL(const char *data, int VL_nbits);
 
   void deparse(char *data) const;
 
@@ -239,21 +253,27 @@ class Header : public NamedP4Object {
   }
 
   // useful for header stacks
-  void swap_values(Header *other) {
-    std::swap(valid, other->valid);
-    // cannot do that, would invalidate references
-    // std::swap(fields, other.fields);
-    for (size_t i = 0; i < fields.size(); i++) {
-      fields[i].swap_values(&other->fields[i]);
-    }
-  }
+  void swap_values(Header *other);
 
-  void copy_fields(const Header &src) {
-    for (size_t f = 0; f < fields.size(); f++)
-      fields[f].copy_value(src.fields[f]);
-  }
+  void copy_fields(const Header &src);
 
+  // compare to another header instance; returns true iff headers have the same
+  // type, are both valid (irrelevant for metadata) and all the fields have the
+  // same value.
+  bool cmp(const Header &other) const;
+
+#ifdef BMDEBUG_ON
   void set_packet_id(const Debugger::PacketId *id);
+#else
+  void set_packet_id(const Debugger::PacketId *) { }
+#endif
+
+  //! Returns a reference to the name of the field at the given offset.
+  const std::string &get_field_name(int field_offset) const;
+
+  //! Returns the full name of the field at the given offset as a new
+  //! string. The name is of the form <hdr_name>.<f_name>.
+  const std::string get_field_full_name(int field_offset) const;
 
   Header(const Header &other) = delete;
   Header &operator=(const Header &other) = delete;
@@ -264,16 +284,35 @@ class Header : public NamedP4Object {
 
  private:
   void extract_VL(const char *data, const PHV &phv);
+  template <typename Fn>
+  void extract_VL_common(const char *data, const Fn &VL_fn);
+
+  // called by the PHV class
+  void set_union_membership(HeaderUnion *header_union, size_t idx);
 
  private:
+  struct UnionMembership {
+    UnionMembership(HeaderUnion *header_union, size_t idx);
+
+    void make_valid();
+    void make_invalid();
+
+    HeaderUnion *header_union;
+    size_t idx;
+  };
+
   const HeaderType &header_type;
   std::vector<Field> fields{};
   bool valid{false};
+  // is caching this pointer here really useful?
+  Field *valid_field{nullptr};
   bool metadata{false};
-  int nbytes_phv{0};
   int nbytes_packet{0};
-  std::unique_ptr<ArithExpression> VL_expr{nullptr};
+  std::unique_ptr<ArithExpression> VL_expr;
+  std::unique_ptr<UnionMembership> union_membership{nullptr};
+#ifdef BMDEBUG_ON
   const Debugger::PacketId *packet_id{&Debugger::dummy_PacketId};
+#endif
 };
 
 }  // namespace bm

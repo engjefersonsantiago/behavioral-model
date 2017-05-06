@@ -1,11 +1,14 @@
-SUBDIRS = . CLI_tests
+if COND_THRIFT
+MAYBE_CLI_TESTS = CLI_tests
+endif
+
+SUBDIRS = . $(MAYBE_CLI_TESTS)
 
 AM_CPPFLAGS += \
--isystem $(top_srcdir)/third_party \
+-isystem $(top_srcdir)/third_party/gtest/include \
 -I$(srcdir)/.. \
 -I$(srcdir)/ \
 -DTESTDATADIR=\"$(srcdir)/testdata\"
-AM_CXXFLAGS = -pthread
 LDADD = $(builddir)/../libsimpleswitch.la \
 $(top_builddir)/third_party/gtest/libgtest.la \
 $(top_builddir)/src/bm_apps/libbmapps.la \

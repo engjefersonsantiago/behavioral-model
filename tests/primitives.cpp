@@ -19,6 +19,13 @@
  */
 
 #include <bm/bm_sim/actions.h>
+#include <bm/bm_sim/counters.h>
+#include <bm/bm_sim/extern.h>
+#include <bm/bm_sim/meters.h>
+#include <bm/bm_sim/packet.h>
+
+#include <string>
+#include <thread>
 
 using namespace bm;
 
@@ -32,7 +39,6 @@ REGISTER_PRIMITIVE(modify_field);
 
 class drop : public ActionPrimitive<> {
   void operator ()() {
-
   }
 };
 
@@ -49,6 +55,8 @@ REGISTER_PRIMITIVE(add_to_field);
 class generate_digest : public ActionPrimitive<const Data &, const Data &> {
   void operator ()(const Data &receiver, const Data &learn_id) {
     // stub only
+    (void)receiver;
+    (void)learn_id;
   }
 };
 
@@ -79,3 +87,28 @@ class register_write
 };
 
 REGISTER_PRIMITIVE(register_write);
+
+class ignore_string : public ActionPrimitive<const std::string &> {
+  void operator ()(const std::string &s) {
+    (void)s;
+  }
+};
+
+REGISTER_PRIMITIVE(ignore_string);
+
+class RegisterSpin : public ActionPrimitive<RegisterArray &, const Data &> {
+  void operator ()(RegisterArray &register_array, const Data &ts) {
+    register_array.at(0).set(ts);
+    std::this_thread::sleep_for(std::chrono::milliseconds(ts.get_uint()));
+  }
+};
+
+REGISTER_PRIMITIVE(RegisterSpin);
+
+// one dummy extern
+
+class DummyExtern : public ExternType {
+ public:
+  BM_EXTERN_ATTRIBUTES { }
+};
+BM_REGISTER_EXTERN(DummyExtern);

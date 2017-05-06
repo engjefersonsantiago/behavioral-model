@@ -19,6 +19,7 @@
  */
 
 #include <bm/bm_sim/packet.h>
+#include <bm/bm_sim/phv.h>
 
 #include <algorithm>  // for swap
 #include <atomic>
@@ -27,9 +28,10 @@
 
 namespace bm {
 
-typedef Debugger::PacketId PacketId;
+using PacketId = Debugger::PacketId;
 
 constexpr size_t Packet::nb_registers;
+constexpr size_t Packet::INVALID_ENTRY_INDEX;
 
 copy_id_t
 CopyIdGenerator::add_one(packet_id_t packet_id) {

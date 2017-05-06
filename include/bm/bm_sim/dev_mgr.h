@@ -46,9 +46,9 @@ namespace bm {
 
 class DevMgrIface : public PacketDispatcherIface {
  public:
-  typedef PortMonitorIface::port_t port_t;
-  typedef PortMonitorIface::PortStatus PortStatus;
-  typedef PortMonitorIface::PortStatusCb PortStatusCb;
+  using port_t = PortMonitorIface::port_t;
+  using PortStatus = PortMonitorIface::PortStatus;
+  using PortStatusCb = PortMonitorIface::PortStatusCb;
 
   struct PortInfo {
     PortInfo(port_t port_num, const std::string &iface_name)
@@ -123,11 +123,11 @@ class DevMgrIface : public PacketDispatcherIface {
 class DevMgr : public PacketDispatcherIface {
  public:
   //! @copydoc PortMonitorIface::port_t
-  typedef PortMonitorIface::port_t port_t;
+  using port_t = PortMonitorIface::port_t;
   //! @copydoc PortMonitorIface::PortStatus
-  typedef PortMonitorIface::PortStatus PortStatus;
+  using PortStatus = PortMonitorIface::PortStatus;
   //! @copydoc PortMonitorIface::PortStatusCb
-  typedef PortMonitorIface::PortStatusCb PortStatusCb;
+  using PortStatusCb = PortMonitorIface::PortStatusCb;
 
   DevMgr();
 
@@ -145,12 +145,14 @@ class DevMgr : public PacketDispatcherIface {
   // wait before starting to process packets.
   void set_dev_mgr_files(unsigned wait_time_in_seconds);
 
+#ifdef BMNANOMSG_ON
   // if enforce ports is set to true, packets coming in on un-registered ports
   // are dropped
   void set_dev_mgr_packet_in(
       int device_id, const std::string &addr,
       std::shared_ptr<TransportIface> notifications_transport = nullptr,
       bool enforce_ports = false);
+#endif
 
   ReturnCode port_add(const std::string &iface_name, port_t port_num,
                       const char *in_pcap, const char *out_pcap);
@@ -183,6 +185,10 @@ class DevMgr : public PacketDispatcherIface {
 
  protected:
   ~DevMgr();
+
+  std::string sample_packet_data(const char *buffer, int len);
+
+  size_t dump_packet_data{0};
 
  private:
   // Actual implementation (private)

@@ -20,17 +20,109 @@
 
 #include <bm/bm_sim/calculations.h>
 #include <bm/bm_sim/logger.h>
+#include <bm/bm_sim/packet.h>
+#include <bm/bm_sim/phv.h>
 
 #include <netinet/in.h>
 
 #include <string>
 #include <algorithm>
 #include <mutex>
+#include <ostream>
 
 #include "xxhash.h"
 #include "crc_tables.h"
+#include "extract.h"
 
 namespace bm {
+
+void
+BufBuilder::push_back_field(header_id_t header, int field_offset) {
+  field_t f = {header, field_offset};
+  entries.emplace_back(f);
+}
+
+void
+BufBuilder::push_back_constant(const ByteContainer &v, size_t nbits) {
+  constant_t c = {v, nbits};
+  entries.emplace_back(c);
+}
+
+void
+BufBuilder::push_back_header(header_id_t header) {
+  header_t h = {header};
+  entries.emplace_back(h);
+}
+
+void
+BufBuilder::append_payload() {
+  with_payload = true;
+}
+
+struct BufBuilder::Deparse : public boost::static_visitor<> {
+  Deparse(const PHV &phv, ByteContainer *buf, int init_offset = 0)
+      : phv(phv), buf(buf), nbits(init_offset) { }
+
+  char *extend(int more_bits) {
+    int nbits_ = nbits + more_bits;
+    buf->resize((nbits_ + 7) / 8, '\x00');
+    char *ptr = buf->data() + (nbits / 8);
+    nbits = nbits_;
+    return ptr;
+  }
+
+  int get_offset() const {
+    return nbits % 8;
+  }
+
+  void operator()(const field_t &f) {
+    const Header &header = phv.get_header(f.header);
+    if (!header.is_valid()) return;
+    const Field &field = header.get_field(f.field_offset);
+    // get_offset needs to be called before extend!
+    const auto offset = get_offset();
+    field.deparse(extend(field.get_nbits()), offset);
+  }
+
+  void operator()(const constant_t &c) {
+    // get_offset needs to be called before extend!
+    const auto offset = get_offset();
+    extract::generic_deparse(&c.v[0], c.nbits, extend(c.nbits), offset);
+  }
+
+  void operator()(const header_t &h) {
+    assert(get_offset() == 0);
+    const Header &header = phv.get_header(h.header);
+    if (header.is_valid()) {
+      header.deparse(extend(header.get_nbytes_packet() * 8));
+    }
+  }
+
+  Deparse(const Deparse &other) = delete;
+  Deparse &operator=(const Deparse &other) = delete;
+
+  Deparse(Deparse &&other) = delete;
+  Deparse &operator=(Deparse &&other) = delete;
+
+  const PHV &phv;
+  ByteContainer *buf;
+  int nbits{0};
+};
+
+void
+BufBuilder::operator()(const Packet &pkt, ByteContainer *buf) const {
+  buf->clear();
+  const PHV *phv = pkt.get_phv();
+  Deparse visitor(*phv, buf);
+  std::for_each(entries.begin(), entries.end(),
+                boost::apply_visitor(visitor));
+  if (with_payload) {
+    size_t curr = buf->size();
+    size_t psize = pkt.get_data_size();
+    buf->resize(curr + psize);
+    std::copy(pkt.data(), pkt.data() + psize, buf->begin() + curr);
+  }
+}
 
 namespace hash {
 
@@ -106,7 +198,7 @@ template <typename T>
 struct crc_custom {
   static constexpr size_t width = sizeof(T) * 8;
   static constexpr size_t kTEntries = 256u;
-  typedef typename CustomCrcMgr<T>::crc_config_t crc_config_t;
+  using crc_config_t = typename CustomCrcMgr<T>::crc_config_t;
 
   crc_custom() {
     std::memcpy(crc_table, crc_custom_init<T>::crc_table, sizeof(crc_table));
@@ -265,10 +357,23 @@ REGISTER_HASH(cksum16);
 REGISTER_HASH(csum16);
 REGISTER_HASH(identity);
 
-typedef crc_custom<uint16_t> crc16_custom;
+using crc16_custom = crc_custom<uint16_t>;
 REGISTER_HASH(crc16_custom);
-typedef crc_custom<uint32_t> crc32_custom;
+using crc32_custom = crc_custom<uint32_t>;
 REGISTER_HASH(crc32_custom);
+
+namespace detail {
+
+template <typename T>
+std::ostream &operator<<(std::ostream &out, const crc_config_t<T> &c) {
+  out << "polynomial: " << c.polynomial << ", initial_remainder: "
+      << c.initial_remainder << ", final_xor_value: " << c.final_xor_value
+      << ", data_reflected: " << c.data_reflected
+      << ", remainder_reflected: " << c.remainder_reflected;
+  return out;
+}
+
+}  // namespace detail
 
 template <typename T>
 CustomCrcErrorCode
@@ -284,7 +389,7 @@ template <typename T>
 CustomCrcErrorCode
 CustomCrcMgr<T>::update_config(RawCalculationIface<uint64_t> *c,
                                const crc_config_t &config) {
-  typedef RawCalculation<uint64_t, crc_custom<T> > ExpectedCType;
+  using ExpectedCType = RawCalculation<uint64_t, crc_custom<T> >;
   auto raw_c = dynamic_cast<ExpectedCType *>(c);
   if (!raw_c) return CustomCrcErrorCode::WRONG_TYPE_CALCULATION;
   raw_c->get_hash_fn().update_config(config);

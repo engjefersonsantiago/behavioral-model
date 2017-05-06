@@ -49,6 +49,7 @@
 #ifndef BM_BM_SIM_CONTEXT_H_
 #define BM_BM_SIM_CONTEXT_H_
 
+#include <iosfwd>
 #include <mutex>
 #include <atomic>
 #include <string>
@@ -57,11 +58,27 @@
 #include <typeindex>
 
 #include "P4Objects.h"
+#include "action_profile.h"
 #include "match_tables.h"
 #include "runtime_interface.h"
 #include "lookup_structures.h"
 
 namespace bm {
+
+//! Provides safe access to an extern instance for control plane calls.
+class ExternSafeAccess {
+ public:
+  ExternSafeAccess(boost::shared_lock<boost::shared_mutex> &&lock,
+                   ExternType *instance)
+      : lock(std::move(lock)), instance(instance) { }
+
+  //! Get a pointer to the extern instance itself.
+  ExternType *get() const { return instance; }
+
+ private:
+  boost::shared_lock<boost::shared_mutex> lock;
+  ExternType *instance;
+};
 
 //! Implements a switch within a switch.
 //!
@@ -70,13 +87,13 @@ class Context final {
   friend class SwitchWContexts;
 
  public:
-  typedef RuntimeInterface::mbr_hdl_t mbr_hdl_t;
-  typedef RuntimeInterface::grp_hdl_t grp_hdl_t;
+  using mbr_hdl_t = RuntimeInterface::mbr_hdl_t;
+  using grp_hdl_t = RuntimeInterface::grp_hdl_t;
 
-  typedef RuntimeInterface::MeterErrorCode MeterErrorCode;
-  typedef RuntimeInterface::RegisterErrorCode RegisterErrorCode;
+  using MeterErrorCode = RuntimeInterface::MeterErrorCode;
+  using RegisterErrorCode = RuntimeInterface::RegisterErrorCode;
 
-  typedef RuntimeInterface::ErrorCode ErrorCode;
+  using ErrorCode = RuntimeInterface::ErrorCode;
 
  public:
   // needs to be default constructible if I want to put it in a std::vector
@@ -105,19 +122,22 @@ class Context final {
   // do these methods need any protection?
   // TODO(antonin): should I return shared_ptrs instead of raw_ptrs?
 
-  //! Get a raw, non-owning pointer to the Pipeline object with P4 name \p name
+  //! Get a raw, non-owning pointer to the Pipeline object with P4 name \p
+  //! name. Return a nullptr if there is no pipeline with this name.
   Pipeline *get_pipeline(const std::string &name) {
-    return p4objects->get_pipeline(name);
+    return p4objects->get_pipeline_rt(name);
   }
 
-  //! Get a raw, non-owning pointer to the Parser object with P4 name \p name
+  //! Get a raw, non-owning pointer to the Parser object with P4 name \p
+  //! name. Return a nullptr if there is no parser with this name.
   Parser *get_parser(const std::string &name) {
-    return p4objects->get_parser(name);
+    return p4objects->get_parser_rt(name);
   }
 
-  //! Get a raw, non-owning pointer to the Deparser object with P4 name \p name
+  //! Get a raw, non-owning pointer to the Deparser object with P4 name \p
+  //! name. Return a nullptr if there is no deparser with this name.
   Deparser *get_deparser(const std::string &name) {
-    return p4objects->get_deparser(name);
+    return p4objects->get_deparser_rt(name);
   }
 
   //! Get a raw, non-owning pointer to the FieldList object with id
@@ -125,6 +145,11 @@ class Context final {
   FieldList *get_field_list(const p4object_id_t field_list_id) {
     return p4objects->get_field_list(field_list_id);
   }
+
+  //! Obtain a pointer to an extern instance, wrapped inside an ExternSafeAccess
+  //! object. The wrapper holds a shared mutex, to make sure that accessing the
+  //! extern is safe (in the case where a P4 swap occurs).
+  ExternSafeAccess get_extern_instance(const std::string &name);
 
   // Added for testing, other "object types" can be added if needed
   p4object_id_t get_table_id(const std::string &name) {
@@ -138,6 +163,9 @@ class Context final {
 
  private:
   // ---------- runtime interfaces ----------
+
+  MatchErrorCode
+  mt_get_num_entries(const std::string &table_name, size_t *num_entries) const;
 
   MatchErrorCode
   mt_add_entry(const std::string &table_name,
@@ -167,21 +195,50 @@ class Context final {
                    entry_handle_t handle,
                    unsigned int ttl_ms);
 
+  // action profiles
+
   MatchErrorCode
-  mt_indirect_add_member(const std::string &table_name,
+  mt_act_prof_add_member(const std::string &act_prof_name,
                          const std::string &action_name,
-                         ActionData action_data,
-                         mbr_hdl_t *mbr);
+                         ActionData action_data, mbr_hdl_t *mbr);
 
   MatchErrorCode
-  mt_indirect_delete_member(const std::string &table_name,
-                            mbr_hdl_t mbr);
+  mt_act_prof_delete_member(const std::string &act_prof_name, mbr_hdl_t mbr);
 
   MatchErrorCode
-  mt_indirect_modify_member(const std::string &table_name,
-                            mbr_hdl_t mbr_hdl,
+  mt_act_prof_modify_member(const std::string &act_prof_name, mbr_hdl_t mbr,
                             const std::string &action_name,
                             ActionData action_data);
+
+  MatchErrorCode
+  mt_act_prof_create_group(const std::string &act_prof_name, grp_hdl_t *grp);
+
+  MatchErrorCode
+  mt_act_prof_delete_group(const std::string &act_prof_name, grp_hdl_t grp);
+
+  MatchErrorCode
+  mt_act_prof_add_member_to_group(const std::string &act_prof_name,
+                                  mbr_hdl_t mbr, grp_hdl_t grp);
+
+  MatchErrorCode
+  mt_act_prof_remove_member_from_group(const std::string &act_prof_name,
+                                       mbr_hdl_t mbr, grp_hdl_t grp);
+
+  std::vector<ActionProfile::Member>
+  mt_act_prof_get_members(const std::string &act_prof_name) const;
+
+  MatchErrorCode
+  mt_act_prof_get_member(const std::string &act_prof_name, grp_hdl_t grp,
+                         ActionProfile::Member *member) const;
+
+  std::vector<ActionProfile::Group>
+  mt_act_prof_get_groups(const std::string &act_prof_name) const;
+
+  MatchErrorCode
+  mt_act_prof_get_group(const std::string &act_prof_name, grp_hdl_t grp,
+                        ActionProfile::Group *group) const;
+
+  // indirect tables
 
   MatchErrorCode
   mt_indirect_add_entry(const std::string &table_name,
@@ -207,23 +264,6 @@ class Context final {
   MatchErrorCode
   mt_indirect_set_default_member(const std::string &table_name,
                                  mbr_hdl_t mbr);
-
-  MatchErrorCode
-  mt_indirect_ws_create_group(const std::string &table_name,
-                              grp_hdl_t *grp);
-
-  MatchErrorCode
-  mt_indirect_ws_delete_group(const std::string &table_name,
-                              grp_hdl_t grp);
-
-  MatchErrorCode
-  mt_indirect_ws_add_member_to_group(const std::string &table_name,
-                                     mbr_hdl_t mbr, grp_hdl_t grp);
-
-  MatchErrorCode
-  mt_indirect_ws_remove_member_from_group(
-      const std::string &table_name,
-      mbr_hdl_t mbr, grp_hdl_t grp);
 
   MatchErrorCode
   mt_indirect_ws_add_entry(const std::string &table_name,
@@ -258,19 +298,12 @@ class Context final {
   mt_get_default_entry(const std::string &table_name,
                        typename T::Entry *default_entry) const;
 
-  std::vector<MatchTableIndirect::Member>
-  mt_indirect_get_members(const std::string &table_name) const;
-
+  template <typename T>
   MatchErrorCode
-  mt_indirect_get_member(const std::string &table_name, grp_hdl_t grp,
-                         MatchTableIndirect::Member *member) const;
-
-  std::vector<MatchTableIndirectWS::Group>
-  mt_indirect_ws_get_groups(const std::string &table_name) const;
-
-  MatchErrorCode
-  mt_indirect_ws_get_group(const std::string &table_name, grp_hdl_t grp,
-                           MatchTableIndirectWS::Group *group) const;
+  mt_get_entry_from_key(const std::string &table_name,
+                        const std::vector<MatchKeyParam> &match_key,
+                        typename T::Entry *entry,
+                        int priority = 1) const;
 
   MatchErrorCode
   mt_read_counters(const std::string &table_name,
@@ -373,9 +406,9 @@ class Context final {
 
   PHVFactory &get_phv_factory();
 
-  LearnEngine *get_learn_engine();
+  LearnEngineIface *get_learn_engine();
 
-  AgeingMonitor *get_ageing_monitor();
+  AgeingMonitorIface *get_ageing_monitor();
 
   void set_notifications_transport(std::shared_ptr<TransportIface> transport);
 
@@ -385,8 +418,8 @@ class Context final {
 
   void set_force_arith(bool force_arith);
 
-  typedef P4Objects::header_field_pair header_field_pair;
-  typedef P4Objects::ForceArith ForceArith;
+  using header_field_pair = P4Objects::header_field_pair;
+  using ForceArith = P4Objects::ForceArith;
   int init_objects(std::istream *is,
                    LookupStructureFactory * lookup_factory,
                    const std::set<header_field_pair> &required_fields =
@@ -410,6 +443,14 @@ class Context final {
   int do_swap();
 
   int swap_requested() { return swap_ordered; }
+
+  //! Return string-to-string map of the target-specific options included in the
+  //! input config JSON for this context.
+  ConfigOptionMap get_config_options() const;
+
+  //! Return a copy of the error codes map (a bi-directional map between an
+  //! error code's integral value and its name / description).
+  ErrorCodeMap get_error_codes() const;
 
  private:  // data members
   size_t cxt_id{};

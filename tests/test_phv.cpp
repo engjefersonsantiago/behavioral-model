@@ -20,19 +20,18 @@
 
 #include <gtest/gtest.h>
 
+#include <bm/bm_sim/phv.h>
+
 #include <memory>
 #include <string>
 
 #include <cassert>
 
-#include <bm/bm_sim/phv.h>
-
 using namespace bm;
 
 // Google Test fixture for PHV tests
 class PHVTest : public ::testing::Test {
-protected:
-
+ protected:
   PHVFactory phv_factory;
   std::unique_ptr<PHV> phv;
 
@@ -90,6 +89,32 @@ TEST_F(PHVTest, CopyHeaders) {
   ASSERT_EQ(f48, f48_2);
 }
 
+// we are testing that the $valid$ hidden field is properly added internally by
+// the HeaderType class, that it is properly accessible and that it is updated
+// properly.
+TEST_F(PHVTest, HiddenValid) {
+  ASSERT_EQ(2u, testHeaderType.get_hidden_offset(HeaderType::HiddenF::VALID));
+
+  ASSERT_EQ(2u, testHeaderType.get_field_offset("$valid$"));
+
+  const auto &finfo = testHeaderType.get_finfo(2u);
+  ASSERT_EQ("$valid$", finfo.name);
+  ASSERT_EQ(1, finfo.bitwidth);
+  ASSERT_FALSE(finfo.is_signed);
+  ASSERT_TRUE(finfo.is_hidden);
+
+  const Field &f = phv->get_field("test1.$valid$");
+  ASSERT_EQ(0, f.get_int());
+  Header &h = phv->get_header(testHeader1);
+  h.mark_valid();
+  ASSERT_EQ(1, f.get_int());
+  h.mark_invalid();
+  ASSERT_EQ(0, f.get_int());
+
+  // check that both point to the same thing
+  ASSERT_EQ(&f, &phv->get_field(testHeader1, 2u));
+}
+
 TEST_F(PHVTest, FieldAlias) {
   phv_factory.add_field_alias("best.alias.ever", "test1.f16");
   std::unique_ptr<PHV> phv_2 = phv_factory.create();
@@ -116,16 +141,58 @@ TEST_F(PHVTest, FieldAliasDup) {
   ASSERT_EQ(&f, &f_alias);
 }
 
+TEST_F(PHVTest, WrittenTo) {
+  auto &f = phv->get_field("test1.f16");
+  auto reset = [&f]() {
+    f.set_written_to(false);
+    ASSERT_FALSE(f.get_written_to());
+  };
+  ASSERT_FALSE(f.get_written_to());
+
+  // testing different ways of modifying a field
+  f.set(0xab);
+  ASSERT_TRUE(f.get_written_to());
+  reset();
+  f.add(Data(1), Data(1));
+  ASSERT_TRUE(f.get_written_to());
+  reset();
+  const char data[] = {'a', 'b'};
+  f.set_bytes(data, sizeof(data));
+  ASSERT_TRUE(f.get_written_to());
+  reset();
+  f.extract(data, 0);
+  ASSERT_TRUE(f.get_written_to());
+  reset();
+
+  // modifying flag directly
+  f.set_written_to(true);
+  ASSERT_TRUE(f.get_written_to());
+  reset();
+
+  // through header method
+  auto &hdr = phv->get_header("test1");
+  hdr.set_written_to(true);
+  ASSERT_TRUE(f.get_written_to());
+  hdr.set_written_to(false);
+  ASSERT_FALSE(f.get_written_to());
+
+  // through phv method
+  phv->set_written_to(true);
+  ASSERT_TRUE(f.get_written_to());
+  phv->set_written_to(false);
+  ASSERT_FALSE(f.get_written_to());
+}
+
 using testing::Types;
 
 template <typename IteratorType>
 struct PHVRef { };
 
 template <>
-struct PHVRef<PHV::header_name_iterator> { typedef PHV& type; };
+struct PHVRef<PHV::header_name_iterator> { using type = PHV&; };
 
 template <>
-struct PHVRef<PHV::const_header_name_iterator> { typedef const PHV& type; };
+struct PHVRef<PHV::const_header_name_iterator> { using type = const PHV&; };
 
 template <typename IteratorType>
 class PHVHeaderNameIteratorTest : public PHVTest {
@@ -133,11 +200,10 @@ class PHVHeaderNameIteratorTest : public PHVTest {
     PHVTest::SetUp();
     phv = phv_factory.create();
   }
-
 };
 
-typedef Types<PHV::header_name_iterator,
-              PHV::const_header_name_iterator> NameIteratorTypes;
+using NameIteratorTypes = Types<PHV::header_name_iterator,
+                                PHV::const_header_name_iterator>;
 
 TYPED_TEST_CASE(PHVHeaderNameIteratorTest, NameIteratorTypes);
 
@@ -156,10 +222,10 @@ TYPED_TEST(PHVHeaderNameIteratorTest, Iterate) {
 }
 
 template <>
-struct PHVRef<PHV::header_iterator> { typedef PHV& type; };
+struct PHVRef<PHV::header_iterator> { using type = PHV&; };
 
 template <>
-struct PHVRef<PHV::const_header_iterator> { typedef const PHV& type; };
+struct PHVRef<PHV::const_header_iterator> { using type = const PHV&; };
 
 template <typename IteratorType>
 class PHVHeaderIteratorTest : public PHVTest {
@@ -167,10 +233,9 @@ class PHVHeaderIteratorTest : public PHVTest {
     PHVTest::SetUp();
     phv = phv_factory.create();
   }
-
 };
 
-typedef Types<PHV::header_iterator, PHV::const_header_iterator> IteratorTypes;
+using IteratorTypes = Types<PHV::header_iterator, PHV::const_header_iterator>;
 
 TYPED_TEST_CASE(PHVHeaderIteratorTest, IteratorTypes);
 
@@ -178,10 +243,10 @@ template <typename IteratorType>
 struct HeaderRef { };
 
 template <>
-struct HeaderRef<PHV::header_iterator> { typedef Header& type; };
+struct HeaderRef<PHV::header_iterator> { using type = Header&; };
 
 template <>
-struct HeaderRef<PHV::const_header_iterator> { typedef const Header& type; };
+struct HeaderRef<PHV::const_header_iterator> { using type = const Header&; };
 
 TYPED_TEST(PHVHeaderIteratorTest, Iterate) {
   typename PHVRef<TypeParam>::type phv_ref = *(this->phv).get();

@@ -27,18 +27,22 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <type_traits>
 
 #include <cassert>
 
-#include "packet.h"
-#include "phv.h"
+#include "phv_forward.h"
 #include "named_p4object.h"
-#include "event_logger.h"
-#include "logger.h"
-#include "expressions.h"
 #include "stateful.h"
+#include "parser_error.h"
 
 namespace bm {
+
+class Packet;
+
+class BoolExpression;
+class ArithExpression;
+class ActionFn;
 
 struct field_t {
   header_id_t header;
@@ -56,10 +60,13 @@ struct ParserLookAhead {
   int bitwidth;
   size_t nbytes;
 
-  ParserLookAhead(int offset, int bitwidth);
+  static ParserLookAhead make(int offset, int bitwidth);
 
   void peek(const char *data, ByteContainer *res) const;
 };
+
+static_assert(std::is_pod<ParserLookAhead>::value,
+              "ParserLookAhead is used in union and we assume it is POD data");
 
 struct ParserOp {
   virtual ~ParserOp() {}
@@ -67,138 +74,64 @@ struct ParserOp {
                           size_t *bytes_parsed) const = 0;
 };
 
-struct ParserOpExtract : ParserOp {
-  header_id_t header;
-
-  explicit ParserOpExtract(header_id_t header)
-    : header(header) {}
-
-  void operator()(Packet *pkt, const char *data,
-                  size_t *bytes_parsed) const override {
-    PHV *phv = pkt->get_phv();
-    Header &hdr = phv->get_header(header);
-    BMELOG(parser_extract, *pkt, header);
-    BMLOG_DEBUG_PKT(*pkt, "Extracting header '{}'", hdr.get_name());
-    hdr.extract(data, *phv);
-    *bytes_parsed += hdr.get_nbytes_packet();
-  }
-};
-
-// push back a header on a tag stack
-// TODO(antonin): probably room for improvement here
-struct ParserOpExtractStack : ParserOp {
-  header_stack_id_t header_stack;
-
-  explicit ParserOpExtractStack(header_stack_id_t header_stack)
-    : header_stack(header_stack) {}
-
-  void operator()(Packet *pkt, const char *data,
-                  size_t *bytes_parsed) const override {
-    PHV *phv = pkt->get_phv();
-    HeaderStack &stack = phv->get_header_stack(header_stack);
-    Header &next_hdr = stack.get_next();  // TODO(antonin): will assert if full
-    BMELOG(parser_extract, *pkt, next_hdr.get_id());
-    BMLOG_DEBUG_PKT(*pkt, "Extracting to header stack {}, next header is {}",
-                    header_stack, next_hdr.get_id());
-    next_hdr.extract(data, *phv);
-    *bytes_parsed += next_hdr.get_nbytes_packet();
-    // should I have a HeaderStack::extract() method instead?
-    stack.push_back();
-  }
-};
-
+// need to be in the header because of unit tests
 template <typename T>
 struct ParserOpSet : ParserOp {
   field_t dst;
   T src;
 
   ParserOpSet(header_id_t header, int offset, const T &src)
-    : dst({header, offset}), src(src) {
-    // dst = {header, offset};
-  }
+      : dst({header, offset}), src(src) { }
 
   void operator()(Packet *pkt, const char *data,
                   size_t *bytes_parsed) const override;
 };
 
-struct ParseSwitchKeyBuilder {
+class ParseSwitchKeyBuilder {
+ public:
+  void push_back_field(header_id_t header, int field_offset, int bitwidth);
+
+  void push_back_stack_field(header_stack_id_t header_stack, int field_offset,
+                             int bitwidth);
+
+  void push_back_union_stack_field(header_union_stack_id_t header_union_stack,
+                                   size_t header_offset, int field_offset,
+                                   int bitwidth);
+
+  void push_back_lookahead(int offset, int bitwidth);
+
+  std::vector<int> get_bitwidths() const;
+
+  void operator()(const PHV &phv, const char *data, ByteContainer *key) const;
+
+ private:
   struct Entry {
-    // I could use a union, but I only have 2 choices, and they are both quite
-    // small. Plus I make a point of not using unions for non POD data. So I
-    // could either change ParserLookAhead to POD data or go through the trouble
-    // of implementing a union with setters, a copy assignment operator, a
-    // dtor... I'll see if it is worth it later
-    // The larger picture: is there really an improvement in performance. versus
-    // using derived classes and virtual methods ? I guess there is a small one,
-    // not because of the use of the vtable, but because I don't have to store
-    // pointers, but I can store the objects in the vector directly
-    // After some testing, it appears that using this is at least a couple times
-    // faster
-    enum {FIELD, LOOKAHEAD, STACK_FIELD} tag{};
-    field_t field{0, 0};
-    ParserLookAhead lookahead{0, 0};
+    enum {FIELD, LOOKAHEAD, STACK_FIELD, UNION_STACK_FIELD} tag{};
+    // I made sure ParserLookAhead was POD data so that it is easy to use in the
+    // union
+    union {
+      field_t field;
+      struct {
+        header_union_stack_id_t header_union_stack;
+        size_t header_offset;
+        int offset;
+      } union_stack_field;
+      ParserLookAhead lookahead;
+    };
 
-    static Entry make_field(header_id_t header, int offset) {
-      Entry e;
-      e.tag = FIELD;
-      e.field.header = header;
-      e.field.offset = offset;
-      return e;
-    }
+    static Entry make_field(header_id_t header, int offset);
 
-    static Entry make_stack_field(header_stack_id_t header_stack, int offset) {
-      Entry e;
-      e.tag = STACK_FIELD;
-      e.field.header = header_stack;
-      e.field.offset = offset;
-      return e;
-    }
+    static Entry make_stack_field(header_stack_id_t header_stack, int offset);
 
-    static Entry make_lookahead(int offset, int bitwidth) {
-      Entry e;
-      e.tag = LOOKAHEAD;
-      e.lookahead = ParserLookAhead(offset, bitwidth);
-      return e;
-    }
+    static Entry make_union_stack_field(
+        header_union_stack_id_t header_union_stack, size_t header_offset,
+        int offset);
+
+    static Entry make_lookahead(int offset, int bitwidth);
   };
 
   std::vector<Entry> entries{};
   std::vector<int> bitwidths{};
-
-  void push_back_field(header_id_t header, int field_offset, int bitwidth) {
-    entries.push_back(Entry::make_field(header, field_offset));
-    bitwidths.push_back(bitwidth);
-  }
-
-  void push_back_stack_field(header_stack_id_t header_stack, int field_offset,
-                             int bitwidth) {
-    entries.push_back(Entry::make_stack_field(header_stack, field_offset));
-    bitwidths.push_back(bitwidth);
-  }
-
-  void push_back_lookahead(int offset, int bitwidth) {
-    entries.push_back(Entry::make_lookahead(offset, bitwidth));
-    bitwidths.push_back(bitwidth);
-  }
-
-  std::vector<int> get_bitwidths() const { return bitwidths; }
-
-  void operator()(const PHV &phv, const char *data, ByteContainer *key) const {
-    for (const Entry &e : entries) {
-      switch (e.tag) {
-      case Entry::FIELD:
-        key->append(phv.get_field(e.field.header, e.field.offset).get_bytes());
-        break;
-      case Entry::STACK_FIELD:
-        key->append(phv.get_header_stack(e.field.header).get_last()
-                    .get_field(e.field.offset).get_bytes());
-        break;
-      case Entry::LOOKAHEAD:
-        e.lookahead.peek(data, key);
-        break;
-      }
-    }
-  }
 };
 
 class ParseState;
@@ -230,10 +163,10 @@ class ParseVSetIface {
 // future.
 class ParseVSet : public NamedP4Object, public ParseVSetIface {
   template <typename P> friend class ParseSwitchCaseVSet;
-  typedef std::unique_lock<std::mutex> Lock;
+  using Lock = std::unique_lock<std::mutex>;
 
  public:
-  typedef ParseVSetIface::ErrorCode ErrorCode;
+  using ErrorCode = ParseVSetIface::ErrorCode;
 
   ParseVSet(const std::string &name, p4object_id_t id,
             size_t compressed_bitwidth);
@@ -291,7 +224,12 @@ class ParseState : public NamedP4Object {
   ParseState(const std::string &name, p4object_id_t id);
 
   void add_extract(header_id_t header);
+  void add_extract_VL(header_id_t header,
+                      const ArithExpression &field_length_expr,
+                      size_t max_header_bytes);
   void add_extract_to_stack(header_stack_id_t header_stack);
+  void add_extract_to_union_stack(header_union_stack_id_t header_union_stack,
+                                  size_t header_offset);
 
   void add_set_from_field(header_id_t dst_header, int dst_offset,
                           header_id_t src_header, int src_offset);
@@ -304,6 +242,13 @@ class ParseState : public NamedP4Object {
 
   void add_set_from_expression(header_id_t dst_header, int dst_offset,
                                const ArithExpression &expr);
+
+  void add_verify(const BoolExpression &condition,
+                  const ArithExpression &error_expr);
+
+  void add_method_call(ActionFn *action_fn);
+
+  void add_shift(size_t shift_bytes);
 
   void set_key_builder(const ParseSwitchKeyBuilder &builder);
 
@@ -356,12 +301,10 @@ class ParseState : public NamedP4Object {
 //! Implements a P4 parser.
 class Parser : public NamedP4Object {
  public:
-  Parser(const std::string &name, p4object_id_t id)
-    : NamedP4Object(name, id), init_state(nullptr) { }
+  Parser(const std::string &name, p4object_id_t id,
+         const ErrorCodeMap *error_codes);
 
-  void set_init_state(const ParseState *state) {
-    init_state = state;
-  }
+  void set_init_state(const ParseState *state);
 
   //! Extracts Packet headers as specified by the parse graph. When the parser
   //! extracts a header to the PHV, the header is marked as valid. After parsing
@@ -382,6 +325,8 @@ class Parser : public NamedP4Object {
 
  private:
   const ParseState *init_state;
+  const ErrorCodeMap *error_codes;
+  const ErrorCode no_error;
 };
 
 }  // namespace bm

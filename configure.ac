@@ -46,12 +46,22 @@ AM_CONDITIONAL([COND_PDFIXED], [test "$want_pdfixed" = yes])
 
 MY_CPPFLAGS=""
 
+AC_ARG_WITH([nanomsg],
+    AS_HELP_STRING([--with-nanomsg], [Build Nanomsg RPC service, if disabled then you must have some other way of controlling the switch]),
+    [want_nanomsg="$withval"], [want_nanomsg=yes])
+
+AM_CONDITIONAL([COND_NANOMSG], [test "$want_nanomsg" = yes])
+
 debugger_enabled=no
 AC_ARG_ENABLE([debugger],
     AS_HELP_STRING([--enable-debugger], [Enable bmv2 remote debugger]))
 AS_IF([test "x$enable_debugger" = "xyes"], [
-    debugger_enabled=yes
-    MY_CPPFLAGS="$MY_CPPFLAGS -DBMDEBUG_ON"
+    AS_IF([test "$want_nanomsg" = "yes"], [
+        debugger_enabled=yes
+        MY_CPPFLAGS="$MY_CPPFLAGS -DBMDEBUG_ON"
+    ], [
+        AC_MSG_ERROR([Cannot use debugger without nanomsg])
+    ])
 ])
 
 logging_macros_enabled=no
@@ -68,10 +78,34 @@ elogger_enabled=no
 AC_ARG_ENABLE([elogger],
     AS_HELP_STRING([--disable-elogger],
                    [Disable nanomsg event logger (some unit tests may fail)]))
+
 AS_IF([test "x$enable_elogger" != "xno"], [
-    elogger_enabled=yes
-    MY_CPPFLAGS="$MY_CPPFLAGS -DBMELOG_ON"
+    AS_IF([test "$want_nanomsg" = "yes"], [
+        elogger_enabled=yes
+        MY_CPPFLAGS="$MY_CPPFLAGS -DBMELOG_ON"
+    ], [
+        AC_MSG_WARN([Cannot use elogger without nanomsg])
+    ])
 ])
+
+AC_ARG_ENABLE([undeterministic_tests],
+    AS_HELP_STRING([--disable-undeterministic-tests],
+                   [Skip undeterministic tests (e.g. queueing) when running "make check"]))
+AM_CONDITIONAL([SKIP_UNDETERMINISTIC_TESTS],
+               [test "x$enable_undeterministic_tests" = "xno"])
+
+AC_ARG_WITH([thrift],
+    AS_HELP_STRING([--with-thrift], [Build Thrift RPC service, if disabled then you must have some other way of controlling the switch]),
+    [want_thrift="$withval"], [want_thrift=yes])
+
+AM_CONDITIONAL([COND_THRIFT], [test "$want_thrift" = yes])
+
+want_pi=no
+AC_ARG_WITH([pi],
+    AS_HELP_STRING([--with-pi], [Build PI implementation for bmv2, this implementation is not the one included in the PI repository (which is the recommended one)]),
+    [want_pi=yes], [])
+
+AM_CONDITIONAL([COND_PI], [test "$want_pi" = yes])
 
 # Checks for programs.
 AC_PROG_CXX
@@ -88,32 +122,53 @@ AC_LANG_PUSH(C)
 AC_LANG_PUSH(C++)
 
 # Thrift
-AC_WITH([p4thrift],
-    [
+want_p4thrift=no
+AC_ARG_WITH([p4thrift],
+    AS_HELP_STRING([--with-p4thrift], [Use p4lang version of Thrift]),
+    [want_p4thrift=yes], [])
+
+AS_IF([test "$want_thrift" = no && test "$want_p4thrift" = yes],
+    [AC_MSG_ERROR(cannot use --with-p4thrift if Thrift is disabled)])
+
+AS_IF([test "$want_thrift" = no && test "$want_pdfixed" = yes],
+    [AC_MSG_ERROR(cannot use --with-pdfixed if Thrift is disabled)])
+
+AS_IF([test "$want_thrift" = yes], [
+    AS_IF([test "$want_p4thrift" = yes], [
         AC_PATH_PROG([THRIFT], [p4thrift], [])
         AC_SUBST([THRIFT_LIB], ["-lp4thrift"])
-        WITH_P4THRIFT="true"
         MY_CPPFLAGS="$MY_CPPFLAGS -DP4THRIFT"
         AC_CHECK_HEADER([p4thrift/P4Thrift.h], [], [AC_MSG_ERROR([P4Thrift headers not found. Install P4Thrift from http://github.com/p4lang/thrift/])])
-    ],
-    [
+    ], [
         AC_PATH_PROG([THRIFT], [thrift], [])
         AC_SUBST([THRIFT_LIB], ["-lthrift"])
         AC_CHECK_HEADER([thrift/Thrift.h], [], [AC_MSG_ERROR([Thrift headers not found. Install Thrift from http://thrift.apache.org/docs/install/])])
     ])
-AM_CONDITIONAL([P4THRIFT], [test "x$WITH_P4THRIFT" != "x"])
-AS_IF([test x"$THRIFT" = x],
-[AC_MSG_ERROR([cannot find thrift])])
+    AS_IF([test x"$THRIFT" = x], [AC_MSG_ERROR([cannot find thrift])])
+    MY_CPPFLAGS="$MY_CPPFLAGS -DBMTHRIFT_ON"
+])
 
+AS_IF([test "$want_pi" = yes], [
+    PI_url=https://github.com/p4lang/PI/
+    AC_CHECK_HEADERS([PI/pi.h PI/target/pi_imp.h PI/p4info.h], [],
+                     [AC_MSG_ERROR([Cannot find PI headers, did you install $PI_url])])
+])
+
+AM_CONDITIONAL([P4THRIFT], [test "$want_p4thrift" = yes])
 
 AC_CHECK_HEADERS([algorithm array cassert cmath queue \
 cstdio string sys/stat.h sys/types.h ctime tuple unistd.h unordered_map \
 utility vector], [], [AC_MSG_ERROR([Missing header file])])
 
-# Check for libjudy, libgmp, libnanomsg, libpcap
+AS_IF([test "$want_nanomsg" = yes], [
+    AC_CHECK_LIB([nanomsg], [nn_errno], [], [AC_MSG_ERROR([Missing libnanomsg])])
+    MY_CPPFLAGS="$MY_CPPFLAGS -DBMNANOMSG_ON"
+])
+
+# Check for pthread, libjudy, libgmp, libpcap
+AX_PTHREAD([], [AC_MSG_ERROR([Missing pthread library])])
 AC_CHECK_LIB([Judy], [Judy1Next], [], [AC_MSG_ERROR([Missing libJudy])])
 AC_CHECK_LIB([gmp], [__gmpz_init], [], [AC_MSG_ERROR([Missing libgmp])])
-AC_CHECK_LIB([nanomsg], [nn_errno], [], [AC_MSG_ERROR([Missing libnanomsg])])
 AC_CHECK_LIB([pcap], [pcap_create], [], [AC_MSG_ERROR([Missing libpcap])])
 AC_CHECK_LIB([pcap], [pcap_set_immediate_mode], [pcap_fix=yes], [pcap_fix=no])
 if test -n "$COVERAGE_FLAGS"; then
@@ -145,6 +200,11 @@ AM_CONDITIONAL([WITH_PCAP_FIX], [test "$pcap_fix" = "yes"])
 # C++ libraries are harder (http://nerdland.net/2009/07/detecting-c-libraries-with-autotools/),
 # so use headers to check
 AC_CHECK_HEADER([boost/thread.hpp], [], [AC_MSG_ERROR([Boost threading headers not found])])
+# need to check at least for the libboost_thread since it is -mt.so
+AX_CXX_CHECK_LIB([boost_thread], [boost::thread], [],
+                 [AX_CXX_CHECK_LIB([boost_thread-mt], [boost::thread],
+                                   [LIBS="-lboost_thread-mt $LIBS"],
+                                   [AC_MSG_ERROR([Missing boost thread library])])])
 AC_CHECK_HEADER([boost/multiprecision/gmp.hpp], [], [AC_MSG_ERROR([Missing boost Multiprecision headers])])
 AC_CHECK_HEADER([boost/program_options.hpp], [], [AC_MSG_ERROR([Missing boost program options header])])
 AC_CHECK_HEADER([boost/functional/hash.hpp], [], [AC_MSG_ERROR([Missing boost functional hash header])])
@@ -155,8 +215,8 @@ AC_SUBST([AM_CPPFLAGS], ["$MY_CPPFLAGS \
                           -isystem\$(top_srcdir)/third_party/jsoncpp/include \
                           -isystem\$(top_srcdir)/third_party/spdlog"])
 
-AC_SUBST([AM_CXXFLAGS], ["-Wall -Werror -Wextra"])
-AC_SUBST([AM_CFLAGS], [""])
+AC_SUBST([AM_CXXFLAGS], ["$PTHREAD_CFLAGS -Wall -Werror -Wextra"])
+AC_SUBST([AM_CFLAGS], ["$PTHREAD_CFLAGS"])
 
 # Checks for typedefs, structures, and compiler characteristics.
 # not supported by autoconf 2.68, add to m4/ ?
@@ -191,7 +251,8 @@ AC_CONFIG_FILES([Makefile
 		tests/stress_tests/Makefile
                 tools/Makefile
                 pdfixed/Makefile
-                pdfixed/include/Makefile])
+                pdfixed/include/Makefile
+                PI/Makefile])
 
 # Generate other files
 AC_CONFIG_FILES([tests/utils.cpp
@@ -205,7 +266,13 @@ AC_OUTPUT
 AS_ECHO("")
 AS_ECHO("Features recap ......................")
 AS_ECHO("Coverage enabled .............. : $coverage_enabled")
-AS_ECHO("Debugger enabled .............. : $debugger_enabled")
 AS_ECHO("Logging macros enabled ........ : $logging_macros_enabled")
+AS_ECHO("With Nanomsg .................. : $want_nanomsg")
 AS_ECHO("Event logger enabled .......... : $elogger_enabled")
+AS_ECHO("Debugger enabled .............. : $debugger_enabled")
+AS_ECHO("With Thrift ................... : $want_thrift")
+AS_IF([test "$want_thrift" = yes], [
+AS_ECHO("  With p4Thrift ............... : $want_p4thrift")
+])
 AS_ECHO("With pdfixed .................. : $want_pdfixed")
+AS_ECHO("With PI ....................... : $want_pi")

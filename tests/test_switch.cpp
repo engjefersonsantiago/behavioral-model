@@ -20,17 +20,19 @@
 
 #include <gtest/gtest.h>
 
+#include <boost/filesystem.hpp>
+
+#include <bm/bm_sim/switch.h>
+#include <bm/bm_runtime/bm_runtime.h>
+
 #include <fstream>
 #include <sstream>
 #include <vector>
 #include <string>
+#include <thread>
+#include <map>
 
-#include <boost/filesystem.hpp>
-
-#include <bm/bm_sim/switch.h>
 #include "utils.h"
-
-#include <bm/bm_runtime/bm_runtime.h>
 
 using namespace bm;
 
@@ -53,12 +55,12 @@ char char2digit(char c) {
 
 class SwitchTest : public Switch {
  public:
-  int receive(int port_num, const char *buffer, int len) override {
+  int receive_(int port_num, const char *buffer, int len) override {
     (void) port_num; (void) buffer; (void) len;
     return 0;
   }
 
-  void start_and_return() override {
+  void start_and_return_() override {
   }
 
   // needed because the method is protected
@@ -93,6 +95,56 @@ TEST(Switch, GetConfig) {
   ASSERT_EQ(std::string(md5.begin(), md5.end()), sw.get_config_md5());
 }
 
+TEST(Switch, ConfigOptions) {
+  fs::path config_path =
+      fs::path(TESTDATADIR) / fs::path("config_options.json");
+  SwitchTest sw;
+  sw.init_objects(config_path.string(), 0, nullptr);
+
+  const auto config_options = sw.get_config_options();
+  ASSERT_EQ(2u, config_options.size());
+  ASSERT_EQ("aaa", config_options.at("key1"));
+  ASSERT_EQ("12345", config_options.at("key2"));
+}
+
+TEST(Switch, InitObjectsEmpty) {
+  SwitchTest sw;
+  ASSERT_EQ(0, sw.init_objects_empty(0, nullptr));
+  ASSERT_EQ("{}", sw.get_config());
+  sw.enable_config_swap();
+  using clock = std::chrono::high_resolution_clock;
+  using std::chrono::duration_cast;
+  auto start = clock::now();
+  std::thread config_push_thread([&sw]{
+      std::string new_config("{}");
+      sw.load_new_config(new_config);
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      sw.swap_configs();
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+  });
+  sw.start_and_return();
+  auto end = clock::now();
+  config_push_thread.join();
+  auto elapsed = duration_cast<std::chrono::milliseconds>(end - start).count();
+  EXPECT_NEAR(elapsed, 1000, 500);
+}
+
+TEST(Switch, GetP4Objects) {
+  // re-using serialize.json here as a convenience
+  fs::path config_path = fs::path(TESTDATADIR) / fs::path("serialize.json");
+  SwitchTest sw;
+  sw.init_objects(config_path.string(), 0, nullptr);
+
+  ASSERT_EQ(nullptr, sw.get_parser("bad_parser"));
+  ASSERT_NE(nullptr, sw.get_parser("parser"));
+
+  ASSERT_EQ(nullptr, sw.get_deparser("bad_deparser"));
+  ASSERT_NE(nullptr, sw.get_deparser("deparser"));
+
+  ASSERT_EQ(nullptr, sw.get_pipeline("bad_pipeline"));
+  ASSERT_NE(nullptr, sw.get_pipeline("ingress"));
+}
+
 TEST(Switch, SerializeState1) {
   fs::path config_path = fs::path(TESTDATADIR) / fs::path("serialize.json");
   SwitchTest sw;
@@ -108,7 +160,7 @@ TEST(Switch, SerializeState1) {
   ASSERT_EQ(s1.str(), s2.str());
 }
 
-extern bool WITH_VALGRIND; // defined in main.cpp
+extern bool WITH_VALGRIND;  // defined in main.cpp
 
 TEST(Switch, SerializeState2) {
   if (WITH_VALGRIND) {
@@ -171,4 +223,78 @@ TEST(Switch, ForceArithHeader) {
   ASSERT_TRUE(pkt.get_phv()->get_field("hdr.f1").get_arith_flag());
   ASSERT_TRUE(pkt.get_phv()->get_field("hdr.f2").get_arith_flag());
   ASSERT_TRUE(pkt.get_phv()->get_field("hdr.f3").get_arith_flag());
+}
+
+// that's the best place I could find for this test...
+TEST(Switch, ExternSafeAccess) {
+  fs::path config_path = fs::path(TESTDATADIR) / fs::path("one_extern.json");
+  SwitchTest sw;
+  sw.init_objects(config_path.string(), 0, nullptr);
+  auto context = sw.get_context(0);
+  auto extern_wrapper = context->get_extern_instance("extern_1");
+  auto extern_instance = extern_wrapper.get();
+  ASSERT_NE(nullptr, extern_instance);
+}
+
+namespace {
+
+// dummy DevMgrIface implementation for testing
+class MyDevMgr : public DevMgrIface {
+ public:
+  MyDevMgr() { p_monitor = PortMonitorIface::make_dummy(); }
+
+ private:
+  bool port_is_up_(port_t) const override { return true; }
+  std::map<port_t, PortInfo> get_port_info_() const override {
+    return {{99, PortInfo(99, "dummy_port")}};
+  }
+  ReturnCode port_add_(const std::string &, port_t,
+                       const char *, const char *) override {
+    return ReturnCode::SUCCESS;
+  }
+  ReturnCode port_remove_(port_t) override { return ReturnCode::SUCCESS; }
+  ReturnCode set_packet_handler_(const PacketHandler &, void *) override {
+    return ReturnCode::SUCCESS;
+  }
+  void transmit_fn_(int, const char *, int) override { }
+  void start_() override { }
+};
+
+}  // namespace
+
+TEST(Switch, MyDevMgr) {
+  std::unique_ptr<MyDevMgr> my_dev_mgr(new MyDevMgr());
+  SwitchTest sw;
+  int argc = 2;
+  char argv0[] = "switch_test";
+  char argv1[] = "--no-p4";
+  char *argv[] = {argv0, argv1};
+  sw.init_from_command_line_options(
+      argc, argv, nullptr, nullptr, std::move(my_dev_mgr));
+
+  auto port_info = sw.get_port_info();
+  auto dummy_port = port_info.begin()->first;
+  EXPECT_EQ(99, dummy_port);
+}
+
+TEST(Switch, MyTransport) {
+  auto transport = std::make_shared<MemoryAccessor>(1024);
+  std::unique_ptr<MyDevMgr> my_dev_mgr(new MyDevMgr());
+  SwitchTest sw;
+  int argc = 2;
+  char argv0[] = "switch_test";
+  char argv1[] = "--no-p4";
+  char *argv[] = {argv0, argv1};
+  sw.init_from_command_line_options(
+      argc, argv, nullptr, transport, std::move(my_dev_mgr));
+  sw.transport_send_probe(0xaba);
+  struct msg_t {
+    char sub_topic[4];
+    int switch_id;
+    uint64_t x;
+    char _padding[16];  // the header size for notifications is always 32 bytes
+  } __attribute__((packed));
+  msg_t msg;
+  transport->read(reinterpret_cast<char *>(&msg), sizeof(msg));
+  EXPECT_EQ(0xaba, msg.x);
 }
