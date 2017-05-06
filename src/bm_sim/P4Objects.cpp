@@ -219,6 +219,34 @@ ExprType get_opcode_type(ExprOpcode opcode) {
   return ExprType::UNKNOWN;
 }
 
+std::unique_ptr<SourceInfo> object_source_info(const Json::Value &cfg_object) {
+  std::string filename = "";
+  unsigned int line = 0;
+  unsigned int column = 0;
+  std::string source_fragment = "";
+  auto cfg_source_info = cfg_object["source_info"];
+
+  if (cfg_source_info.isNull()) {
+    return nullptr;
+  }
+  if (!cfg_source_info["filename"].isNull()) {
+    filename = cfg_source_info["filename"].asString();
+  }
+  if (!cfg_source_info["line"].isNull()) {
+    line = cfg_source_info["line"].asInt();
+  }
+  if (!cfg_source_info["column"].isNull()) {
+    column = cfg_source_info["column"].asInt();
+  }
+  if (!cfg_source_info["source_fragment"].isNull()) {
+    source_fragment = cfg_source_info["source_fragment"].asString();
+  }
+  auto source_info =
+      std::unique_ptr<SourceInfo>{new SourceInfo(filename, line, column,
+                                                 source_fragment)};
+  return source_info;
+}
+
 }  // namespace
 
 void
@@ -575,7 +603,7 @@ P4Objects::init_header_types(const Json::Value &cfg_root) {
         is_signed = cfg_field[2].asBool();
       if (cfg_field[1].asString() == "*") {  // VL field
         std::unique_ptr<VLHeaderExpression> VL_expr(nullptr);
-        if (!cfg_header_type.isMember("length_exp")) {
+        if (cfg_header_type.isMember("length_exp")) {
           const Json::Value &cfg_length_exp = cfg_header_type["length_exp"];
           ArithExpression raw_expr;
           build_expression(cfg_length_exp, &raw_expr);
@@ -583,7 +611,7 @@ P4Objects::init_header_types(const Json::Value &cfg_root) {
           VL_expr.reset(new VLHeaderExpression(raw_expr));
         }
         int max_header_bytes = 0;
-        if (!cfg_header_type.isMember("max_length"))
+        if (cfg_header_type.isMember("max_length"))
           max_header_bytes = cfg_header_type["max_length"].asInt();
         header_type->push_back_VL_field(
             field_name, max_header_bytes, std::move(VL_expr), is_signed);
@@ -1214,7 +1242,8 @@ P4Objects::init_actions(const Json::Value &cfg_root) {
     const string action_name = cfg_action["name"].asString();
     p4object_id_t action_id = cfg_action["id"].asInt();
     std::unique_ptr<ActionFn> action_fn(new ActionFn(
-        action_name, action_id, cfg_action["runtime_data"].size()));
+        action_name, action_id, cfg_action["runtime_data"].size(),
+        object_source_info(cfg_action)));
 
     const auto &cfg_primitive_calls = cfg_action["primitives"];
     for (const auto &cfg_primitive_call : cfg_primitive_calls)
@@ -1516,9 +1545,8 @@ P4Objects::init_pipelines(const Json::Value &cfg_root,
     for (const auto &cfg_conditional : cfg_conditionals) {
       const string conditional_name = cfg_conditional["name"].asString();
       p4object_id_t conditional_id = cfg_conditional["id"].asInt();
-      Conditional *conditional = new Conditional(conditional_name,
-                                                 conditional_id);
-
+      auto conditional = new Conditional(
+        conditional_name, conditional_id, object_source_info(cfg_conditional));
       const Json::Value &cfg_expression = cfg_conditional["expression"];
       build_expression(cfg_expression, conditional);
       conditional->build();
@@ -1995,8 +2023,14 @@ P4Objects::deserialize(std::istream *in) {
 int
 P4Objects::get_field_offset(header_id_t header_id,
                             const string &field_name) const {
-  const HeaderType &header_type = phv_factory.get_header_type(header_id);
-  return header_type.get_field_offset(field_name);
+  const auto &header_type = phv_factory.get_header_type(header_id);
+  auto offset = header_type.get_field_offset(field_name);
+  if (offset < 0) {
+    throw json_exception(
+        EFormat() << "No field '" << field_name << "' can be found in "
+                  << "header type '" << header_type.get_name() << "'");
+  }
+  return offset;
 }
 
 size_t
@@ -2270,7 +2304,12 @@ P4Objects::add_header_union_stack_id(
 
 header_id_t
 P4Objects::get_header_id(const std::string &name) const {
-  return header_ids_map.at(name);
+  auto it = header_ids_map.find(name);
+  if (it == header_ids_map.end()) {
+    throw json_exception(
+        EFormat() << "No header instance '" << name << "' was defined");
+  }
+  return it->second;
 }
 
 header_stack_id_t

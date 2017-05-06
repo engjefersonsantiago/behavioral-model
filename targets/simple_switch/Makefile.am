@@ -10,7 +10,7 @@ noinst_LTLIBRARIES = libsimpleswitch.la
 
 libsimpleswitch_la_SOURCES = \
 simple_switch.cpp simple_switch.h primitives.cpp \
-extern_rohc_comp.cpp extern_rohc_decomp.cpp thrift/src/SimpleSwitch_server.cpp
+extern_rohc_comp.cpp extern_rohc_decomp.cpp
 
 libsimpleswitch_la_LIBADD = \
 $(top_builddir)/../ROHC/export/librohc_compressor_module.la \
@@ -66,8 +66,6 @@ simple_switch_CLI
 AM_CPPFLAGS += \
 -I$(srcdir)/thrift/src/ \
 -I$(builddir)/gen-cpp
-
-#libsimpleswitch_la_LDFLAGS = -pthread
 
 libsimpleswitch_la_SOURCES += thrift/src/SimpleSwitch_server.cpp
 
